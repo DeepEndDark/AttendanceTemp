@@ -1,0 +1,2 @@
+requests==2.32.3
+# tkinter is bundled with Python — no pip install needed
