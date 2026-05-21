@@ -1,0 +1,4 @@
+requests==2.32.3
+# tkinter is bundled with Python
+# python-dpfj requires DigitalPersona SDK installed separately on Windows
+# pip install python-dpfj   ← run after SDK is installed

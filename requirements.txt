@@ -1,0 +1,11 @@
+clr==1.0.3
+fastapi==0.136.1
+firebase_admin==7.4.0
+jose==1.0.0
+protobuf==7.35.0
+pydantic==2.13.4
+pydantic_settings==2.14.1
+python_bcrypt==0.3.2
+reportlab==4.5.1
+Requests==2.34.2
+uvicorn==0.47.0

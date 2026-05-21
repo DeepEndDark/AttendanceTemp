@@ -1,0 +1,2 @@
+pythonnet not installed (pip install pythonnet). Fingerprint disabled.
+google\cloud\firestore_v1\base_collection.py:317: UserWarning: Detected filter using positional arguments. Prefer using the 'filter' keyword argument instead.
