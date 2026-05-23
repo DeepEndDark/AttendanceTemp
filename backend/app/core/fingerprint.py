@@ -120,6 +120,27 @@ class _FingerprintService:
             reader.On_Captured += self._callback
             log.warning("FP[thread]: callback registered")
 
+            # Wire up Windows power events for sleep/wake recovery
+            try:
+                clr.AddReference("Microsoft.Win32.SystemEvents")
+                from Microsoft.Win32 import SystemEvents, PowerModeChangedEventArgs
+                from Microsoft.Win32 import PowerModes
+                svc = self
+
+                def _on_power_mode(sender, args):
+                    mode = str(args.Mode)
+                    log.warning(f"FP[thread]: power mode change: {mode}")
+                    if "Resume" in mode or "StatusChange" in mode:
+                        log.warning("FP[thread]: wake detected -- reopening reader")
+                        svc._reopen_reader()
+
+                from System import EventHandler
+                _power_handler = EventHandler[PowerModeChangedEventArgs](_on_power_mode)
+                SystemEvents.PowerModeChanged += _power_handler
+                log.warning("FP[thread]: power event handler registered")
+            except Exception as e:
+                log.warning(f"FP[thread]: power event setup failed: {e} -- sleep recovery disabled")
+
             # Arm first capture HERE on the WinForms thread -- mirrors testpy2.py __init__
             self._arm_capture()
 
@@ -132,11 +153,68 @@ class _FingerprintService:
             log.error(f"FP[thread]: exception: {e}")
             self._ready.set()
 
+    def _reopen_reader(self):
+        """
+        Close and reopen the reader after sleep/wake.
+        Called from the power event handler on the WinForms thread.
+        Releases ownership so DPHost.exe reassigns cleanly.
+        """
+        import time
+        dp = self._dp
+        log.warning("FP[reopen]: closing reader...")
+        try:
+            if self._reader:
+                self._reader.CancelCapture()
+                self._reader.On_Captured -= self._callback
+                self._reader.Dispose()
+                self._reader = None
+        except Exception as e:
+            log.warning(f"FP[reopen]: close error (expected): {e}")
+
+        # Brief wait for DPHost to release ownership
+        time.sleep(2.0)
+
+        log.warning("FP[reopen]: reopening reader...")
+        for attempt in range(5):
+            try:
+                readers = dp.ReaderCollection.GetReaders()
+                if readers.Count == 0:
+                    log.warning(f"FP[reopen]: no readers (attempt {attempt+1})")
+                    time.sleep(2.0)
+                    continue
+
+                reader = readers[0]
+                result = reader.Open(
+                    dp.Constants.CapturePriority.DP_PRIORITY_EXCLUSIVE)
+                log.warning(f"FP[reopen]: Open result = {result}")
+
+                if result != dp.Constants.ResultCode.DP_SUCCESS:
+                    log.warning(f"FP[reopen]: open failed (attempt {attempt+1})")
+                    time.sleep(2.0)
+                    continue
+
+                self._reader = reader
+                self._callback = dp.Reader.CaptureCallback(self._on_captured)
+                reader.On_Captured += self._callback
+                # Drain stale queue signals
+                for q in (self._touch_queue, self._fid_queue):
+                    while not q.empty():
+                        try: q.get_nowait()
+                        except Exception: break
+                self._arm_capture()
+                log.warning("FP[reopen]: reader reopened and armed successfully")
+                return
+            except Exception as e:
+                log.error(f"FP[reopen]: attempt {attempt+1} error: {e}")
+                time.sleep(2.0)
+
+        log.error("FP[reopen]: all reopen attempts failed -- scanner unavailable")
+
     def _arm_capture(self):
-        """Arm CaptureAsync. Retries once if DP_DEVICE_BUSY."""
+        """Arm CaptureAsync. Retries on DP_DEVICE_BUSY."""
         dp = self._dp
         import time
-        for attempt in range(5):
+        for attempt in range(10):
             try:
                 resolution = self._reader.Capabilities.Resolutions[0]
                 result = self._reader.CaptureAsync(
@@ -147,11 +225,11 @@ class _FingerprintService:
                 log.warning(f"FP: _arm_capture attempt {attempt+1} result={result}")
                 if "BUSY" not in str(result):
                     return
-                time.sleep(0.3)
+                time.sleep(0.5)
             except Exception as e:
                 log.error(f"FP: _arm_capture error: {e}")
                 return
-        log.warning("FP: _arm_capture gave up after 5 attempts")
+        log.warning("FP: _arm_capture gave up after 10 attempts")
 
     def _on_captured(self, capture_result):
         """Fires on WinForms thread when finger is placed. Mirrors testpy2.py."""
@@ -185,8 +263,8 @@ class _FingerprintService:
             # Sleep lets the finger lift before CaptureAsync is called again.
             # Safe here -- hidden form has no other UI events to process.
             import time
-            time.sleep(1.0)
-            log.warning("FP[thread]: re-arming after 1s sleep")
+            time.sleep(1.5)
+            log.warning("FP[thread]: re-arming after 1.5s sleep")
             self._arm_capture()
 
     def wait_for_touch(self, timeout: float = 30.0) -> bool:
