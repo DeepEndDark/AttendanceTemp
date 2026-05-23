@@ -139,6 +139,43 @@ class APIClient:
         return self._post("/attendance/time-out",
                           {"client_name": client_name})
 
+    def finger_touch(self):
+        """
+        Blocks up to ~32 s waiting for a finger to be physically placed.
+        Returns True on touch, False on timeout or error.
+        """
+        try:
+            r = self._session.post(
+                f"{BASE_URL}/attendance/finger-touch",
+                json={},
+                headers=self._headers(),
+                timeout=(5, 35),   # read timeout > server-side 30 s
+            )
+            if r.status_code == 200:
+                return r.json().get("touched", False)
+        except Exception:
+            pass
+        return False
+
+    def fingerprint_scan(self):
+        """
+        Blocks up to ~10 s for next finger scan result.
+        Returns display event dict or None on error.
+        Read timeout must exceed scanner's 7 s capture window.
+        """
+        try:
+            r = self._session.post(
+                f"{BASE_URL}/attendance/scan",
+                json={},
+                headers=self._headers(),
+                timeout=(5, 12),
+            )
+            if r.status_code == 200:
+                return r.json()
+        except Exception:
+            pass
+        return None
+
     # ── Items ─────────────────────────────────────────────────
 
     def list_items(self):

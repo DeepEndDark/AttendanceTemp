@@ -1,329 +1,199 @@
 import clr
-import sys
-import os
-
-# =========================================================
-# SDK PATH
-# =========================================================
-
-SDK_PATH = r"C:\Path\To\SDK"
-
-sys.path.append(SDK_PATH)
-
-# =========================================================
-# LOAD DLLS
-# =========================================================
+import time
+import threading
 
 clr.AddReference("System.Windows.Forms")
 clr.AddReference("DPUruNet")
 
-import DPUruNet
+import DPUruNet as dp
 
-from System.Windows.Forms import Application, Form
-
-# =========================================================
-# TEMPLATE DIRECTORY
-# =========================================================
-
-TEMPLATE_DIR = r"C:\Users\johnh\Downloads\attendance_sales_v2\project2\templates"
-
-# =========================================================
-# MATCH SETTINGS
-# =========================================================
-
-PROBABILITY_ONE = 0x7fffffff
-MATCH_THRESHOLD = int(PROBABILITY_ONE / 100000)
-
-print("Match Threshold:", MATCH_THRESHOLD)
+from System.Windows.Forms import (
+    Application,
+    Form,
+    Label,
+    FormWindowState,
+    DockStyle,
+)
 
 # =========================================================
-# IDENTIFICATION FORM
+# GLOBAL STATE
 # =========================================================
 
-class IdentifyForm(Form):
+reader = None
+callback = None
 
-    def __init__(self):
+scan_count = 0
+arm_count = 0
 
-        Form.__init__(self)
+# =========================================================
+# ARM FUNCTION
+# =========================================================
 
-        self.reader = None
-        self.templates = []
+def arm():
 
-        # =====================================================
-        # LOAD SAVED TEMPLATES
-        # =====================================================
+    global reader, arm_count
 
-        print("\n========================================")
-        print("LOADING SAVED TEMPLATES")
-        print("========================================")
+    arm_count += 1
 
-        self.load_templates()
+    print(f"\n[ARM ATTEMPT #{arm_count}] CaptureAsync...")
 
-        if len(self.templates) == 0:
-            print("No templates loaded")
-            Application.Exit()
-            return
+    try:
 
-        # =====================================================
-        # GET READERS
-        # =====================================================
+        resolution = reader.Capabilities.Resolutions[0]
 
-        readers = DPUruNet.ReaderCollection.GetReaders()
-
-        print("\nReader count:", readers.Count)
-
-        if readers.Count == 0:
-            print("No readers found")
-            Application.Exit()
-            return
-
-        self.reader = readers[0]
-
-        print("Using reader:")
-        print(self.reader.Description.Name)
-
-        # =====================================================
-        # OPEN READER
-        # =====================================================
-
-        result = self.reader.Open(
-            DPUruNet.Constants.CapturePriority.DP_PRIORITY_COOPERATIVE
+        result = reader.CaptureAsync(
+            dp.Constants.Formats.Fid.ANSI,
+            dp.Constants.CaptureProcessing.DP_IMG_PROC_DEFAULT,
+            resolution,
         )
 
-        print("Open result:", result)
+        print(f"[ARM #{arm_count}] result: {result}")
 
-        if result != DPUruNet.Constants.ResultCode.DP_SUCCESS:
-            print("Failed to open reader")
-            Application.Exit()
-            return
+        return result
 
-        # =====================================================
-        # CHECK STATUS
-        # =====================================================
+    except Exception as e:
 
-        status = self.reader.GetStatus()
+        print("[ARM ERROR]:", e)
+        return None
 
-        print("Status result:", status)
-        print("Reader state:", self.reader.Status.Status)
+# =========================================================
+# FIXED 3-SECOND RE-ARM
+# =========================================================
 
-        # =====================================================
-        # REGISTER CALLBACK
-        # =====================================================
+def safe_rearm():
 
-        self.capture_callback = DPUruNet.Reader.CaptureCallback(
-            self.on_captured
-        )
+    def worker():
 
-        self.reader.On_Captured += self.capture_callback
+        import time
 
-        # =====================================================
-        # START CAPTURE ONCE
-        # =====================================================
+        delay = 2.0
 
-        self.start_capture()
+        print("\n[RE-ARM] Fixed 3-second cooldown started")
+        time.sleep(delay)
 
-        print("\n========================================")
-        print("READY - WAITING FOR FINGER")
-        print("========================================")
+        print("[RE-ARM] Attempting CaptureAsync after 3s...")
 
-    # =========================================================
-    # LOAD SAVED TEMPLATES
-    # =========================================================
+        result = arm()
 
-    def load_templates(self):
+        if result == dp.Constants.ResultCode.DP_SUCCESS:
+            print("[RE-ARM SUCCESS] Scanner ready")
 
-        files = [
-            f for f in os.listdir(TEMPLATE_DIR)
-            if f.endswith(".fmd")
-        ]
+        elif result == dp.Constants.ResultCode.DP_DEVICE_BUSY:
+            print("[RE-ARM BUSY] Still busy after 3 seconds")
 
-        print("FMD files found:", len(files))
+        else:
+            print("[RE-ARM STATE]", result)
 
-        for filename in files:
+    threading.Thread(target=worker, daemon=True).start()
 
-            try:
+# =========================================================
+# CALLBACK
+# =========================================================
 
-                path = os.path.join(TEMPLATE_DIR, filename)
+def on_captured(result):
 
-                with open(path, "rb") as f:
-                    data = f.read()
+    global scan_count
 
-                # =================================================
-                # IMPORT SAVED FMD
-                # =================================================
+    scan_count += 1
 
-                result = DPUruNet.Importer.ImportFmd(
-                    data,
-                    DPUruNet.Constants.Formats.Fmd.ANSI,
-                    DPUruNet.Constants.Formats.Fmd.ANSI
-                )
+    print("\n====================================")
+    print(f"[SCAN DETECTED #{scan_count}]")
+    print("====================================")
 
-                print("Import result:", result.ResultCode)
+    try:
 
-                if result.ResultCode != DPUruNet.Constants.ResultCode.DP_SUCCESS:
-                    print("Failed to import:", filename)
-                    continue
+        print("[RESULT]:", result.ResultCode)
 
-                fmd = result.Data
+        if result.ResultCode == dp.Constants.ResultCode.DP_SUCCESS:
 
-                self.templates.append((filename, fmd))
+            if result.Data is not None:
+                print("[SCAN] Fingerprint captured ✔")
+            else:
+                print("[SCAN] Empty data")
 
-                print("Loaded:", filename)
+        else:
+            print("[SCAN] Capture failed")
 
-            except Exception as ex:
+    except Exception as e:
+        print("[SCAN ERROR]:", e)
 
-                print("Error loading:", filename)
-                print(ex)
+    finally:
 
-        print("Total templates loaded:", len(self.templates))
+        print(f"[SCAN #{scan_count}] Scheduling 3-second re-arm...")
+        safe_rearm()
 
-    # =========================================================
-    # START CAPTURE
-    # =========================================================
+# =========================================================
+# MAIN
+# =========================================================
 
-    def start_capture(self):
+print("========================================")
+print("U.ARE.U 4500 FIXED 3-SECOND TEST")
+print("========================================")
 
-        try:
+readers = dp.ReaderCollection.GetReaders()
 
-            resolution = self.reader.Capabilities.Resolutions[0]
+print("[READY] Reader count:", readers.Count)
 
-            print("\nStarting capture...")
-            print("Using resolution:", resolution)
+if readers.Count == 0:
+    print("[ERROR] No fingerprint reader found")
+    raise SystemExit
 
-            result = self.reader.CaptureAsync(
-                DPUruNet.Constants.Formats.Fid.ANSI,
-                DPUruNet.Constants.CaptureProcessing.DP_IMG_PROC_DEFAULT,
-                resolution
-            )
+reader = readers[0]
 
-            print("CaptureAsync result:", result)
+print("[READY] Device:", reader.Description.Name)
 
-        except Exception as ex:
+# =========================================================
+# OPEN DEVICE
+# =========================================================
 
-            print("Capture start failed")
-            print(ex)
+print("\n[INIT] Opening EXCLUSIVE...")
 
-    # =========================================================
-    # CAPTURE CALLBACK
-    # =========================================================
+result = reader.Open(
+    dp.Constants.CapturePriority.DP_PRIORITY_EXCLUSIVE
+)
 
-    def on_captured(self, capture_result):
+print("[INIT] Open result:", result)
 
-        try:
+if result != dp.Constants.ResultCode.DP_SUCCESS:
+    print("[FATAL] Cannot open reader")
+    raise SystemExit
 
-            print("\n========================================")
-            print("FINGER DETECTED")
-            print("========================================")
+# =========================================================
+# CALLBACK REGISTER
+# =========================================================
 
-            print("Capture Result:", capture_result.ResultCode)
+callback = dp.Reader.CaptureCallback(on_captured)
+reader.On_Captured += callback
 
-            if capture_result.ResultCode != DPUruNet.Constants.ResultCode.DP_SUCCESS:
-                print("Capture failed")
-                return
+print("[READY] Callback registered")
 
-            if capture_result.Data is None:
-                print("No capture data")
-                return
+# =========================================================
+# HIDDEN WINDOW (REQUIRED MESSAGE LOOP)
+# =========================================================
 
-            # =================================================
-            # CREATE FMD FROM LIVE FINGER
-            # =================================================
+form = Form()
+form.Text = "4500 Test - 3s Delay"
 
-            result = DPUruNet.FeatureExtraction.CreateFmdFromFid(
-                capture_result.Data,
-                DPUruNet.Constants.Formats.Fmd.ANSI
-            )
+form.ShowInTaskbar = False
+form.WindowState = FormWindowState.Minimized
+form.Opacity = 0
 
-            print("FMD Creation Result:", result.ResultCode)
+label = Label()
+label.Text = "4500 scanner running (3s re-arm)"
+label.Dock = DockStyle.Fill
 
-            if result.ResultCode != DPUruNet.Constants.ResultCode.DP_SUCCESS:
-                print("FMD creation failed")
-                return
+form.Controls.Add(label)
 
-            probe_fmd = result.Data
+# =========================================================
+# INITIAL ARM
+# =========================================================
 
-            # =================================================
-            # COMPARE AGAINST SAVED TEMPLATES
-            # =================================================
+print("\n[READY] Initial arm...")
 
-            print("\n========================================")
-            print("COMPARING")
-            print("========================================")
+arm()
 
-            matched = False
+print("\n========================================")
+print("[SYSTEM READY] WAITING FOR FINGERPRINTS")
+print("========================================")
 
-            for filename, saved_fmd in self.templates:
-
-                compare_result = DPUruNet.Comparison.Compare(
-                    probe_fmd,
-                    0,
-                    saved_fmd,
-                    0
-                )
-
-                if compare_result.ResultCode != DPUruNet.Constants.ResultCode.DP_SUCCESS:
-                    print("Compare failed:", filename)
-                    continue
-
-                score = compare_result.Score
-
-                print(f"{filename} -> score: {score}")
-
-                if score < MATCH_THRESHOLD:
-
-                    print("\n========================================")
-                    print("MATCH FOUND")
-                    print("Template:", filename)
-                    print("Score:", score)
-                    print("========================================")
-
-                    matched = True
-                    break
-
-            if not matched:
-
-                print("\n========================================")
-                print("NO MATCH FOUND")
-                print("========================================")
-
-            print("\nWaiting for next finger...")
-
-        except Exception as ex:
-
-            print("\nERROR:")
-            print(ex)
-
-    # =========================================================
-    # CLEANUP
-    # =========================================================
-
-    def cleanup(self):
-
-        try:
-            if self.reader:
-                self.reader.CancelCapture()
-        except:
-            pass
-
-        try:
-            if self.reader:
-                self.reader.Dispose()
-        except:
-            pass
-
-        print("\nReader closed")
-
-
-# =============================================================
-# START APPLICATION
-# =============================================================
-
-form = IdentifyForm()
-
-try:
-
-    Application.Run(form)
-
-finally:
-
-    form.cleanup()
+Application.Run(form)

@@ -4,6 +4,8 @@ Header (username + role) + sidebar navigation + content area.
 Shares a thread-safe queue with the client display window.
 """
 import queue
+import threading
+import time
 import tkinter as tk
 from tkinter import ttk
 
@@ -23,6 +25,7 @@ class App(tk.Tk):
         self._view_cache: dict = {}
         self._nav_buttons: dict = {}
         self._view_classes: dict = {}
+        self._scanner_stop = threading.Event()
         self._show_login()
 
     # ── Login ────────────────────────────────────────────────
@@ -44,6 +47,8 @@ class App(tk.Tk):
         self._client_win = ClientDisplayWindow(self, self._display_queue)
         self._client_win.protocol("WM_DELETE_WINDOW",
                                   lambda: None)  # prevent closing independently
+        self._scanner_stop.clear()
+        threading.Thread(target=self._scanner_loop, daemon=True).start()
 
         # ── Header ───────────────────────────────────────────
         header = tk.Frame(self, bg="#185FA5", height=48)
@@ -160,7 +165,47 @@ class App(tk.Tk):
 
         self._current_view = view
 
+    def _scanner_loop(self):
+        """
+        Stage 1 — /finger-touch: blocks silently up to 30 s.
+                   Client display stays on idle. No banner shown.
+        Stage 2 — show "Reading..." banner only after finger is detected.
+        Stage 3 — /scan: FID already in queue, returns fast with result.
+        """
+        while not self._scanner_stop.is_set():
+
+            # Stage 1 — wait for physical touch, client stays idle
+            touched = api.finger_touch()
+
+            if self._scanner_stop.is_set():
+                break
+
+            if not touched:
+                # Timeout (30 s, no finger) — loop and wait again
+                continue
+
+            # Stage 2 — finger detected, show "Reading..." now
+            self._display_queue.put({
+                "type":     "scanning",
+                "title":    "Reading...",
+                "subtitle": "Please hold still",
+            })
+
+            # Stage 3 — FID already processed, identify and get result
+            event = api.fingerprint_scan()
+
+            if self._scanner_stop.is_set():
+                break
+
+            if event:
+                self._display_queue.put(event)
+            else:
+                # Network / auth error
+                self._display_queue.put({"type": "clear"})
+                time.sleep(1)
+
     def _logout(self):
+        self._scanner_stop.set()
         api.logout()
         if self._client_win:
             self._client_win.destroy()

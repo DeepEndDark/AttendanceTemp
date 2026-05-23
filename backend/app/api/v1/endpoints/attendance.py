@@ -166,3 +166,105 @@ def time_out(payload: TimeOutRequest, _: TokenData = Depends(require_any)):
     log_data["log_date"] = parts[1] if len(parts) >= 4 else ""
     log_data["time_out"] = now_str
     return _to_read(log_data)
+
+
+# ── Fingerprint continuous scan ───────────────────────────────
+
+@router.post("/finger-touch")
+def finger_touch(_: TokenData = Depends(require_any)):
+    """
+    Blocks silently until a finger is physically placed on the scanner
+    (up to 30 s), then returns. Client display stays on idle screen
+    while this is waiting. Returns {"touched": true} or {"touched": false}
+    on timeout (no finger placed within 30 s — loop retries).
+    """
+    import logging as _log
+    _log = _log.getLogger(__name__)
+    from app.core import fingerprint as fp
+
+    _log.info("FINGER-TOUCH: waiting for finger placement...")
+    if not fp.SCANNER_AVAILABLE:
+        _log.warning("FINGER-TOUCH: scanner unavailable")
+        return {"touched": False}
+
+    touched = fp.wait_for_touch(timeout=30.0)
+    if touched:
+        _log.info("FINGER-TOUCH: finger detected")
+    else:
+        _log.info("FINGER-TOUCH: timeout — no finger in 30 s")
+    return {"touched": touched}
+
+@router.post("/scan")
+def fingerprint_scan(_: TokenData = Depends(require_any)):
+    """
+    Reads the next FID from the always-armed scanner queue, identifies,
+    then auto-executes time-in or time-out. Returns a display event dict.
+    """
+    import logging as _log
+    _log = _log.getLogger(__name__)
+    from app.core import fingerprint as fp
+
+    _log.info("SCAN: identifying finger...")
+    if not fp.SCANNER_AVAILABLE:
+        _log.warning("SCAN: scanner unavailable")
+        return {"type": "scanner_error", "title": "Scanner Unavailable",
+                "subtitle": "Manual mode only"}
+
+    if not fp._cache:
+        _log.warning("SCAN: no enrolled clients in cache")
+        return {"type": "no_match", "title": "No Enrolled Clients",
+                "subtitle": "Enroll clients before using fingerprint scan"}
+
+    client_name = fp.identify_from_cache(rearm=False)
+    _log.info(f"SCAN: result → {client_name!r}")
+
+    if client_name is None:
+        return {"type": "no_match", "title": "No Match Found",
+                "subtitle": "Please try again or see staff"}
+
+    ref = clients().document(client_name)
+    doc = ref.get()
+    if not doc.exists:
+        return {"type": "no_match", "title": "Not Found",
+                "subtitle": client_name}
+
+    data      = doc.to_dict()
+    days_left = data.get("client_days_remaining", 0)
+
+    if days_left <= 0:
+        return {"type": "expired", "title": client_name,
+                "subtitle": "Subscription expired — please renew"}
+
+    currently_in = data.get("client_status", False)
+    now          = datetime.now()
+    today        = date.today().isoformat()
+
+    if not currently_in:
+        uid = next_attendance_uid()
+        log_doc = {
+            "log_uid": uid, "log_date": today,
+            "client_name": client_name,
+            "time_in": now.strftime("%H:%M:%S"), "time_out": None,
+        }
+        db.collection("attendance_logs").document(today).set(
+            {"_date": today}, merge=True)
+        db.collection("attendance_logs").document(today) \
+          .collection("logs").document(str(uid)).set(log_doc)
+        ref.update({"client_status": True, "client_current_uid_log": uid})
+
+        if days_left <= 2:
+            return {"type": "expiry_warn", "title": client_name,
+                    "subtitle": f"Timed in at {log_doc['time_in']}  |  "
+                                f"{days_left} day(s) remaining"}
+        return {"type": "time_in", "title": client_name,
+                "subtitle": f"Timed in at {log_doc['time_in']}"}
+    else:
+        uid     = data.get("client_current_uid_log")
+        now_str = now.strftime("%H:%M:%S")
+        results = list(
+            db.collection_group("logs").where("log_uid", "==", uid).stream())
+        if results:
+            results[0].reference.update({"time_out": now_str})
+        ref.update({"client_status": False})
+        return {"type": "time_out", "title": client_name,
+                "subtitle": f"Timed out at {now_str}"}

@@ -65,7 +65,7 @@ class ClientDisplayWindow(tk.Toplevel):
                 self._handle_event(event)
         except queue.Empty:
             pass
-        self.after(200, self._poll_queue)
+        self.after(100, self._poll_queue)
 
     def _handle_event(self, event: dict):
         etype = event.get("type")
@@ -74,7 +74,13 @@ class ClientDisplayWindow(tk.Toplevel):
             self.after_cancel(self._banner_job)
             self._banner_job = None
 
+        # clear → back to idle
+        if etype == "clear":
+            self._show_idle()
+            return
+
         configs = {
+            "scanning":     ("#7B8CDE", "white", "#1a1a2e"),   # soft blue-purple
             "time_in":      ("#1D9E75", "white", "#0a3d2e"),
             "time_out":     ("#185FA5", "white", "#0a2240"),
             "expiry_warn":  ("#BA7517", "white", "#3d2800"),
@@ -94,7 +100,11 @@ class ClientDisplayWindow(tk.Toplevel):
         self._banner_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
         self._idle_frame.place_forget()
 
-        # Auto-dismiss after 5 seconds
+        # scanning holds until result overwrites it — no auto-dismiss
+        if etype == "scanning":
+            return
+
+        # All other events auto-dismiss after 5 s
         self._banner_job = self.after(5000, self._show_idle)
 
     def _show_idle(self):

@@ -67,16 +67,8 @@ class EnrollView(tk.Frame):
         self._sub_detail.grid(row=4, column=0, columnspan=2,
                                sticky="w", pady=(0, 8))
 
-        # Fingerprint button
-        self._fp_btn = tk.Button(pane, text="Enroll Fingerprint",
-                                 command=self._enroll_fp,
-                                 bg="#5B5AEF", fg="white",
-                                 relief="flat", padx=10)
-        self._fp_btn.grid(row=5, column=0, columnspan=2,
-                          sticky="w", pady=(4, 8))
-
         btn_row = tk.Frame(pane, bg="white")
-        btn_row.grid(row=6, column=0, columnspan=2, pady=(4, 0))
+        btn_row.grid(row=5, column=0, columnspan=2, pady=(4, 0))
         tk.Button(btn_row, text="Enroll New",
                   command=self._enroll_new,
                   bg="#185FA5", fg="white",
@@ -89,8 +81,24 @@ class EnrollView(tk.Frame):
         self._enroll_status = tk.Label(pane, text="", fg="#185FA5",
                                        bg="white", wraplength=280,
                                        font=("", 9))
-        self._enroll_status.grid(row=7, column=0, columnspan=2,
-                                  pady=(8, 0))
+        self._enroll_status.grid(row=6, column=0, columnspan=2,
+                                  pady=(4, 0))
+
+        # FP prompt -- shown after successful enrollment
+        self._fp_frame = tk.Frame(pane, bg="white")
+        self._fp_frame.grid(row=7, column=0, columnspan=2,
+                            sticky="w", pady=(4, 0))
+        self._fp_btn = tk.Button(self._fp_frame,
+                                 text="Enroll Fingerprint Now",
+                                 command=self._enroll_fp,
+                                 bg="#5B5AEF", fg="white",
+                                 relief="flat", padx=10, pady=4)
+        self._fp_btn.pack(side="left", padx=(0, 8))
+        tk.Button(self._fp_frame, text="Skip",
+                  command=self._fp_skip,
+                  relief="flat", padx=8, pady=4,
+                  bg="#f0f0f0").pack(side="left")
+        self._fp_frame.grid_remove()   # hidden until enrollment succeeds
 
         # Recent list
         tk.Label(pane, text="Recent clients:",
@@ -266,10 +274,18 @@ class EnrollView(tk.Frame):
                 messagebox.showwarning("Note", resp["warning"])
             expires = (resp["client"].get("last_plan_expires_at") or "")[:10]
             self._enroll_status.config(
-                text=f"Enrolled '{name}' — {sub} | Expires: {expires}",
+                text=f"Enrolled '{name}' — {sub}  |  Expires: {expires}",
                 fg="#0F6E56")
-            for e in self._entries.values():
-                e.delete(0, "end")
+            # Store name for FP step before clearing fields
+            self._pending_fp_name = name
+            # Clear contact/address, keep name visible for context
+            self._entries["_contact"].delete(0, "end")
+            self._entries["_address"].delete(0, "end")
+            # Show FP prompt
+            self._fp_frame.grid()
+            self._fp_btn.config(state="normal",
+                                text="Enroll Fingerprint Now",
+                                bg="#5B5AEF")
             self._load_recent()
             self._load_clients()
             if self._queue:
@@ -304,20 +320,45 @@ class EnrollView(tk.Frame):
             self._enroll_status.config(text=str(e), fg="red")
 
     def _enroll_fp(self):
-        name = self._entries["_name"].get().strip()
+        name = getattr(self, "_pending_fp_name", None) \
+               or self._entries["_name"].get().strip()
         if not name:
             self._enroll_status.config(
-                text="Enter client name first.", fg="red")
+                text="Enroll a client first.", fg="red")
             return
+        self._fp_btn.config(state="disabled", text="Scanning...")
         self._enroll_status.config(
-            text="Place finger on scanner 3 times...", fg="#185FA5")
-        self.update()
+            text=f"Place finger on scanner 3 times for '{name}'...",
+            fg="#185FA5")
+        import threading
+        threading.Thread(target=self._enroll_fp_worker,
+                         args=(name,), daemon=True).start()
+
+    def _enroll_fp_worker(self, name: str):
         try:
             api.enroll_fingerprint(name)
-            self._enroll_status.config(
-                text="Fingerprint enrolled successfully.", fg="#0F6E56")
-        except APIError as e:
-            self._enroll_status.config(text=str(e), fg="red")
+            self.after(0, self._fp_success)
+        except Exception as e:
+            msg = str(e)
+            self.after(0, lambda: self._fp_error(msg))
+
+    def _fp_success(self):
+        self._enroll_status.config(
+            text="Fingerprint enrolled successfully.", fg="#0F6E56")
+        self._fp_frame.grid_remove()
+        self._entries["_name"].delete(0, "end")
+        self._pending_fp_name = None
+
+    def _fp_error(self, msg: str):
+        self._enroll_status.config(text=f"Failed: {msg}", fg="red")
+        self._fp_btn.config(state="normal", text="Try Again")
+
+    def _fp_skip(self):
+        self._fp_frame.grid_remove()
+        self._entries["_name"].delete(0, "end")
+        self._pending_fp_name = None
+        self._enroll_status.config(
+            text="Fingerprint skipped. Enroll later from client list.", fg="gray")
 
     def _time_in(self):
         name = self._att_var.get()

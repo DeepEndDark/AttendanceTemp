@@ -95,15 +95,17 @@ class ClientsView(tk.Frame):
         except APIError as e:
             self._status_lbl.config(text=str(e))
 
-    def _selected_name(self):
+    def _selected_name(self, warn: bool = True):
         sel = self._tree.selection()
         if not sel:
-            messagebox.showwarning("Select", "Select a client first.")
+            if warn:
+                messagebox.showwarning("Select", "Select a client first.")
             return None
         return self._tree.item(sel[0])["values"][1]
 
     def _on_select(self, _=None):
-        name = self._selected_name()
+        # Silent — no warning on programmatic or deselect events
+        name = self._selected_name(warn=False)
         if name:
             self._detail.load(name)
 
@@ -115,13 +117,7 @@ class ClientsView(tk.Frame):
             return
         dlg = _EnrollDialog(self, subs)
         if dlg.result:
-            try:
-                resp = api.create_client(dlg.result)
-                if resp.get("warning"):
-                    messagebox.showwarning("Note", resp["warning"])
-                self.refresh()
-            except APIError as e:
-                messagebox.showerror("Error", str(e))
+            self.refresh()   # client already created inside dialog
 
     def _edit(self):
         name = self._selected_name()
@@ -335,89 +331,250 @@ class _ClientDetailPanel(tk.Frame):
 
 
 class _EnrollDialog(tk.Toplevel):
+    """
+    Phase 1: fill details + subscription -> Enroll.
+    Phase 2: confirmation + optional fingerprint enrollment inline.
+    """
     def __init__(self, parent, subs: list[dict]):
         super().__init__(parent)
         self.title("Enroll New Client")
+        self.configure(bg="white")
         self.resizable(False, False)
         self.grab_set()
         self.result = None
         self._subs = subs
+        self._build_phase1()
+        self.wait_window()
 
-        fields = [("Client name:", "_name"),
-                  ("Contact number:", "_contact"),
-                  ("Address:", "_address")]
+    def _build_phase1(self):
+        self._phase1 = tk.Frame(self, bg="white", padx=20, pady=16)
+        self._phase1.pack(fill="both", expand=True)
+
+        tk.Label(self._phase1, text="New Client",
+                 font=("", 12, "bold"), bg="white",
+                 fg="#185FA5").grid(row=0, column=0, columnspan=2,
+                                    sticky="w", pady=(0, 12))
+
+        fields = [("Client name *", "_name"),
+                  ("Contact number", "_contact"),
+                  ("Address", "_address")]
         self._entries = {}
-        for i, (lbl, key) in enumerate(fields):
-            tk.Label(self, text=lbl).grid(row=i, column=0,
-                                          sticky="w", padx=14, pady=6)
-            e = tk.Entry(self, width=26)
-            e.grid(row=i, column=1, padx=14, pady=6)
+        for i, (lbl, key) in enumerate(fields, start=1):
+            tk.Label(self._phase1, text=lbl, bg="white",
+                     font=("", 9)).grid(row=i, column=0, sticky="w", pady=5)
+            e = tk.Entry(self._phase1, width=28, relief="solid", bd=1)
+            e.grid(row=i, column=1, padx=(10, 0), pady=5, sticky="ew")
             self._entries[key] = e
 
-        tk.Label(self, text="Subscription:").grid(
-            row=3, column=0, sticky="w", padx=14)
+        tk.Label(self._phase1, text="Subscription *", bg="white",
+                 font=("", 9)).grid(row=4, column=0, sticky="w", pady=5)
         self._sub_var = tk.StringVar()
-        cb = ttk.Combobox(self, textvariable=self._sub_var,
-                          values=[s["subscription_name"] for s in subs],
-                          state="readonly", width=23)
-        cb.grid(row=3, column=1, padx=14, pady=6)
-        if subs:
+        cb = ttk.Combobox(self._phase1, textvariable=self._sub_var,
+                          values=[s["subscription_name"] for s in self._subs],
+                          state="readonly", width=25)
+        cb.grid(row=4, column=1, padx=(10, 0), pady=5, sticky="ew")
+        if self._subs:
             cb.current(0)
 
-        btn = tk.Frame(self)
-        btn.grid(row=4, column=0, columnspan=2, pady=12)
-        tk.Button(btn, text="Enroll", command=self._save,
-                  width=12).pack(side="left", padx=6)
-        tk.Button(btn, text="Cancel", command=self.destroy,
-                  width=10).pack(side="left", padx=6)
-        self.wait_window()
+        self._status = tk.Label(self._phase1, text="", bg="white",
+                                fg="red", font=("", 9), wraplength=280)
+        self._status.grid(row=5, column=0, columnspan=2,
+                          sticky="w", pady=(4, 0))
+
+        btn_row = tk.Frame(self._phase1, bg="white")
+        btn_row.grid(row=6, column=0, columnspan=2,
+                     pady=(14, 0), sticky="e")
+        tk.Button(btn_row, text="Cancel", command=self.destroy,
+                  relief="flat", padx=12, pady=6,
+                  bg="#f0f0f0").pack(side="right", padx=(6, 0))
+        tk.Button(btn_row, text="Enroll",
+                  command=self._save,
+                  relief="flat", padx=12, pady=6,
+                  bg="#185FA5", fg="white").pack(side="right")
+        self._entries["_name"].focus_set()
 
     def _save(self):
         name = self._entries["_name"].get().strip()
-        sub = self._sub_var.get()
+        sub  = self._sub_var.get()
         if not name or not sub:
-            messagebox.showerror("Required",
-                                 "Name and subscription required.")
+            self._status.config(text="Client name and subscription are required.")
             return
-        self.result = {
-            "client_name": name,
+        payload = {
+            "client_name":    name,
             "contact_number": self._entries["_contact"].get().strip() or None,
-            "address": self._entries["_address"].get().strip() or None,
+            "address":        self._entries["_address"].get().strip() or None,
             "subscription_name": sub,
         }
-        self.destroy()
+        try:
+            from fapp.api_client import api
+            resp = api.create_client(payload)
+            if resp.get("warning"):
+                from tkinter import messagebox
+                messagebox.showwarning("Note", resp["warning"])
+            self.result = payload   # signal success to parent
+        except Exception as e:
+            self._status.config(text=str(e), fg="red")
+            return
+        self._phase1.destroy()
+        self._build_phase2(name)
+
+    def _build_phase2(self, name: str):
+        self._phase2 = tk.Frame(self, bg="white", padx=24, pady=20)
+        self._phase2.pack(fill="both", expand=True)
+
+        tk.Label(self._phase2, text="Client Enrolled",
+                 font=("", 13, "bold"),
+                 bg="white", fg="#0F6E56").pack(anchor="w")
+        tk.Label(self._phase2, text=name,
+                 font=("", 11), bg="white", fg="#333").pack(anchor="w",
+                                                             pady=(2, 16))
+        tk.Frame(self._phase2, bg="#e0e0e0", height=1).pack(
+            fill="x", pady=(0, 16))
+
+        tk.Label(self._phase2, text="Enroll fingerprint?",
+                 font=("", 10, "bold"), bg="white").pack(anchor="w")
+        tk.Label(self._phase2,
+                 text="Scan 3 times to register this client.\nYou can skip and do this later from the client list.",
+                 font=("", 9), fg="#666",
+                 bg="white", justify="left").pack(anchor="w", pady=(4, 14))
+
+        self._fp_status = tk.Label(self._phase2, text="",
+                                   bg="white", font=("", 9),
+                                   fg="#185FA5", wraplength=280)
+        self._fp_status.pack(anchor="w", pady=(0, 10))
+
+        btn_row = tk.Frame(self._phase2, bg="white")
+        btn_row.pack(anchor="w")
+
+        self._fp_btn = tk.Button(
+            btn_row, text="Scan Fingerprint",
+            command=lambda: self._start_fp(name),
+            relief="flat", padx=12, pady=6,
+            bg="#5B5AEF", fg="white")
+        self._fp_btn.pack(side="left", padx=(0, 8))
+
+        self._done_btn = tk.Button(
+            btn_row, text="Done",
+            command=self.destroy,
+            relief="flat", padx=12, pady=6,
+            bg="#f0f0f0")
+        self._done_btn.pack(side="left")
+
+    def _start_fp(self, name: str):
+        self._fp_btn.config(state="disabled", text="Scanning...")
+        self._fp_status.config(text="Place finger on scanner 3 times...",
+                               fg="#185FA5")
+        import threading
+        threading.Thread(target=self._fp_worker,
+                         args=(name,), daemon=True).start()
+
+    def _fp_worker(self, name: str):
+        try:
+            from fapp.api_client import api
+            api.enroll_fingerprint(name)
+            self.after(0, self._fp_done_ok)
+        except Exception as e:
+            msg = str(e)
+            self.after(0, lambda: self._fp_done_err(msg))
+
+    def _fp_done_ok(self):
+        self._fp_status.config(text="Fingerprint enrolled.", fg="#0F6E56")
+        self._fp_btn.pack_forget()
+        self._done_btn.config(bg="#185FA5", fg="white", text="Done")
+
+    def _fp_done_err(self, msg: str):
+        self._fp_status.config(text=f"Failed: {msg}", fg="red")
+        self._fp_btn.config(state="normal", text="Try Again")
 
 
 class _EditDialog(tk.Toplevel):
     def __init__(self, parent, client: dict):
         super().__init__(parent)
         self.title(f"Edit — {client['client_name']}")
+        self.configure(bg="white")
         self.resizable(False, False)
         self.grab_set()
         self.result = None
+        self._client_name = client["client_name"]
 
-        fields = [("Contact:", "contact_number"),
+        frame = tk.Frame(self, bg="white", padx=20, pady=16)
+        frame.pack(fill="both", expand=True)
+
+        tk.Label(frame, text=f"Edit: {client['client_name']}",
+                 font=("", 11, "bold"), bg="white",
+                 fg="#185FA5").grid(row=0, column=0, columnspan=2,
+                                    sticky="w", pady=(0, 12))
+
+        fields = [("Contact number:", "contact_number"),
                   ("Address:", "address")]
         self._entries = {}
-        for i, (lbl, key) in enumerate(fields):
-            tk.Label(self, text=lbl).grid(row=i, column=0,
-                                          sticky="w", padx=14, pady=6)
-            e = tk.Entry(self, width=26)
+        for i, (lbl, key) in enumerate(fields, start=1):
+            tk.Label(frame, text=lbl, bg="white",
+                     font=("", 9)).grid(row=i, column=0, sticky="w", pady=6)
+            e = tk.Entry(frame, width=28, relief="solid", bd=1)
             e.insert(0, client.get(key) or "")
-            e.grid(row=i, column=1, padx=14, pady=6)
+            e.grid(row=i, column=1, padx=(10, 0), pady=6, sticky="ew")
             self._entries[key] = e
 
-        btn = tk.Frame(self)
-        btn.grid(row=2, column=0, columnspan=2, pady=12)
-        tk.Button(btn, text="Save", command=self._save,
-                  width=12).pack(side="left", padx=6)
-        tk.Button(btn, text="Cancel", command=self.destroy,
-                  width=10).pack(side="left", padx=6)
+        # Fingerprint section
+        tk.Frame(frame, bg="#e0e0e0", height=1).grid(
+            row=3, column=0, columnspan=2, sticky="ew", pady=(12, 8))
+
+        fp_label = "Fingerprint: Enrolled" if client.get(
+            "fingerprint_enrolled") else "Fingerprint: Not enrolled"
+        fp_color = "#0F6E56" if client.get("fingerprint_enrolled") else "#888"
+        tk.Label(frame, text=fp_label, bg="white",
+                 fg=fp_color, font=("", 9)).grid(
+            row=4, column=0, columnspan=2, sticky="w")
+
+        self._fp_status = tk.Label(frame, text="", bg="white",
+                                   fg="#185FA5", font=("", 9), wraplength=260)
+        self._fp_status.grid(row=5, column=0, columnspan=2,
+                             sticky="w", pady=(2, 0))
+
+        self._fp_btn = tk.Button(frame,
+                                 text="Re-scan Fingerprint",
+                                 command=self._start_fp,
+                                 relief="flat", padx=10, pady=4,
+                                 bg="#5B5AEF", fg="white")
+        self._fp_btn.grid(row=6, column=0, columnspan=2,
+                          sticky="w", pady=(6, 0))
+
+        btn_row = tk.Frame(frame, bg="white")
+        btn_row.grid(row=7, column=0, columnspan=2,
+                     pady=(14, 0), sticky="e")
+        tk.Button(btn_row, text="Cancel", command=self.destroy,
+                  relief="flat", padx=12, pady=6,
+                  bg="#f0f0f0").pack(side="right", padx=(6, 0))
+        tk.Button(btn_row, text="Save", command=self._save,
+                  relief="flat", padx=12, pady=6,
+                  bg="#185FA5", fg="white").pack(side="right")
         self.wait_window()
+
+    def _start_fp(self):
+        self._fp_btn.config(state="disabled", text="Scanning...")
+        self._fp_status.config(text="Place finger 3 times...", fg="#185FA5")
+        import threading
+        threading.Thread(target=self._fp_worker, daemon=True).start()
+
+    def _fp_worker(self):
+        try:
+            from fapp.api_client import api
+            api.enroll_fingerprint(self._client_name)
+            self.after(0, lambda: self._fp_status.config(
+                text="Fingerprint updated.", fg="#0F6E56"))
+            self.after(0, lambda: self._fp_btn.config(
+                state="normal", text="Re-scan Fingerprint"))
+        except Exception as e:
+            msg = str(e)
+            self.after(0, lambda: self._fp_status.config(
+                text=f"Failed: {msg}", fg="red"))
+            self.after(0, lambda: self._fp_btn.config(
+                state="normal", text="Try Again"))
 
     def _save(self):
         self.result = {
             "contact_number": self._entries["contact_number"].get().strip() or None,
-            "address": self._entries["address"].get().strip() or None,
+            "address":        self._entries["address"].get().strip() or None,
         }
         self.destroy()
