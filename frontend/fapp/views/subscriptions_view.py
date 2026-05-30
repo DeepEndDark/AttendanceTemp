@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 from fapp.api_client import api, APIError
 
 
@@ -20,6 +20,8 @@ class SubscriptionsView(tk.Frame):
                   relief="flat", padx=10).pack(side="right", padx=4)
         tk.Button(bar, text="Delete", command=self._delete,
                   bg="#e04040", fg="white",
+                  relief="flat", padx=10).pack(side="right", padx=4)
+        tk.Button(bar, text="Rename", command=self._rename,
                   relief="flat", padx=10).pack(side="right", padx=4)
         tk.Button(bar, text="Edit", command=self._edit,
                   relief="flat", padx=10).pack(side="right", padx=4)
@@ -84,6 +86,20 @@ class SubscriptionsView(tk.Frame):
                 self.refresh()
             except APIError as e:
                 messagebox.showerror("Error", str(e))
+
+    def _rename(self):
+        name = self._selected_name()
+        if not name:
+            return
+        new_name = simpledialog.askstring(
+            "Rename Plan", f"Rename '{name}' to:", parent=self)
+        if not new_name or new_name.strip() == name:
+            return
+        try:
+            api.rename_subscription(name, new_name.strip())
+            self.refresh()
+        except APIError as e:
+            messagebox.showerror("Error", str(e))
 
     def _edit(self):
         name = self._selected_name()

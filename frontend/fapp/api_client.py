@@ -252,6 +252,20 @@ class APIClient:
             "locker_number": locker_number,
         })
 
+    def unassign_locker(self, locker_number: int):
+        return self._delete(f"/lockers/unassign/{locker_number}")
+
+    def get_enroll_progress(self):
+        return self._get("/clients/enroll-fingerprint/progress")
+
+    def rename_subscription(self, name: str, new_name: str):
+        return self._post(f"/subscriptions/{name}/rename",
+                          {"new_name": new_name})
+
+    def rename_item(self, item_name: str, new_name: str):
+        return self._post(f"/items/{item_name}/rename",
+                          {"new_name": new_name})
+
     def list_locker_rentals(self):
         return self._get("/lockers/rentals")
 

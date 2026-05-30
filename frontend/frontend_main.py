@@ -114,8 +114,10 @@ class App(tk.Tk):
             ]
         else:
             nav_items = [
-                ("Enroll Client", EnrollView),
-                ("Sales",         SalesOpenView),
+                ("Enroll Client",     EnrollView),
+                ("Client List",       ClientsView),
+                ("Sales",             SalesOpenView),
+                ("Locker Management", LockerView),
             ]
 
         tk.Label(self._sidebar, text="NAVIGATION",

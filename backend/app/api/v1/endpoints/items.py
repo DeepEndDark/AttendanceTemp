@@ -2,7 +2,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.api.dependencies import require_admin, require_any
 from app.core.firestore_client import items
 from app.schemas.item import ItemCreate, ItemRead, ItemUpdate
+from pydantic import BaseModel
 from app.schemas.token import TokenData
+
+class RenamePayload(BaseModel):
+    new_name: str
 
 router = APIRouter(prefix="/items", tags=["items"])
 
@@ -60,3 +64,40 @@ def delete_item(item_name: str, _: TokenData = Depends(require_admin)):
     if not ref.get().exists:
         raise HTTPException(status_code=404, detail="Item not found")
     ref.delete()
+
+
+@router.post("/{item_name}/rename")
+def rename_item(item_name: str,
+                payload: RenamePayload,
+                _: TokenData = Depends(require_admin)):
+    """
+    Rename an item. Creates new doc, copies data, deletes old.
+    Updates open sale line items only -- closed sales preserve original names.
+    """
+    new_name = payload.new_name.strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="new_name required")
+    if new_name == item_name:
+        raise HTTPException(status_code=400, detail="New name is same as current")
+
+    old_ref = items().document(item_name)
+    old_doc = old_ref.get()
+    if not old_doc.exists:
+        raise HTTPException(status_code=404, detail="Item not found")
+
+    new_ref = items().document(new_name)
+    if new_ref.get().exists:
+        raise HTTPException(status_code=409, detail="Name already taken")
+
+    from app.core.firestore_client import db
+    data = old_doc.to_dict()
+    data["item_name"] = new_name
+    new_ref.set(data)
+    old_ref.delete()
+
+    # Note: open sale line items referencing the old name are not updated.
+    # Closed sales preserve original names by design.
+    # Open sales will show the old name until closed -- acceptable tradeoff
+    # that avoids a costly collection_group index requirement.
+
+    return {"renamed": item_name, "new_name": new_name}

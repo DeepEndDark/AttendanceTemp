@@ -39,6 +39,90 @@ def run_tick() -> None:
     log.info(f"Daily tick complete. last_tick_date={today.isoformat()}")
 
 
+
+def auto_timeout_stale_sessions() -> None:
+    """
+    Find clients still marked as timed-in (client_status=True) whose last
+    log entry is from a previous calendar day, and automatically time them
+    out at 21:00:00 of that day.
+    Called at startup (catch-up) and by the 9 PM scheduler.
+    """
+    from app.core.firestore_client import db, clients
+
+    today     = date.today().isoformat()
+    timed_out = 0
+
+    for client_doc in clients().where("client_status", "==", True).stream():
+        cdata = client_doc.to_dict()
+        uid   = cdata.get("client_current_uid_log")
+        if uid is None:
+            # No log UID — just clear the status flag
+            client_doc.reference.update({"client_status": False})
+            timed_out += 1
+            continue
+
+        # Find the open log entry
+        results = list(
+            db.collection_group("logs")
+            .where("log_uid", "==", uid)
+            .stream()
+        )
+        if not results:
+            client_doc.reference.update({"client_status": False})
+            timed_out += 1
+            continue
+
+        log_data = results[0].to_dict()
+        log_date = log_data.get("log_date", "")
+
+        # Only auto-timeout logs from a previous day
+        if log_date and log_date < today:
+            results[0].reference.update({"time_out": "21:00:00"})
+            client_doc.reference.update({
+                "client_status":          False,
+                "client_current_uid_log": None,
+            })
+            timed_out += 1
+            log.info(
+                f"Auto-timeout: {cdata.get('client_name')} "
+                f"(log {uid} from {log_date}) timed out at 21:00:00")
+
+    if timed_out:
+        log.info(f"Auto-timeout complete: {timed_out} session(s) closed")
+
+
+def start_nightly_timeout_scheduler() -> None:
+    """
+    Background thread that fires auto_timeout_stale_sessions every day at 21:00.
+    Started once from on_startup.
+    """
+    import threading
+    import time as _time
+
+    log.info("Nightly scheduler starting...")
+
+    def _loop():
+        while True:
+            now  = date.today()
+            from datetime import datetime
+            next_9pm = datetime(now.year, now.month, now.day, 21, 0, 0)
+            current  = datetime.now()
+            if current >= next_9pm:
+                # Already past 9 PM today — schedule for tomorrow
+                next_9pm = datetime(now.year, now.month, now.day + 1, 21, 0, 0)
+            wait_secs = (next_9pm - current).total_seconds()
+            log.info(f"Nightly timeout scheduler: next run in "
+                     f"{wait_secs/3600:.1f}h at {next_9pm.strftime('%H:%M')}")
+            _time.sleep(wait_secs)
+            try:
+                auto_timeout_stale_sessions()
+            except Exception as e:
+                log.error(f"Nightly auto-timeout error: {e}")
+
+    t = threading.Thread(target=_loop, daemon=True, name="NightlyTimeout")
+    t.start()
+
+
 def _tick_client(client_name: str, days: int) -> None:
     from app.core.firestore_client import db, clients, client_subs
 

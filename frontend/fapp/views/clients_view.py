@@ -28,6 +28,9 @@ class ClientsView(tk.Frame):
                   relief="flat", padx=10).pack(side="right", padx=4)
         tk.Button(bar, text="Edit", command=self._edit,
                   relief="flat", padx=10).pack(side="right", padx=4)
+        tk.Button(bar, text="Add Plan", command=self._add_plan,
+                  bg="#0F6E56", fg="white",
+                  relief="flat", padx=10).pack(side="right", padx=4)
         tk.Button(bar, text="Enroll New", command=self._enroll,
                   bg="#185FA5", fg="white",
                   relief="flat", padx=10).pack(side="right", padx=4)
@@ -118,6 +121,27 @@ class ClientsView(tk.Frame):
         dlg = _EnrollDialog(self, subs)
         if dlg.result:
             self.refresh()   # client already created inside dialog
+
+    def _add_plan(self):
+        """Add a new subscription plan to an existing client."""
+        name = self._selected_name()
+        if not name:
+            return
+        subs = api.list_subscriptions()
+        if not subs:
+            messagebox.showwarning("No plans",
+                                   "Add subscription plans first.")
+            return
+        dlg = _AddPlanDialog(self, name, subs)
+        if dlg.result:
+            try:
+                resp = api.re_enroll_client(name, dlg.result)
+                if resp.get("warning"):
+                    messagebox.showwarning("Note", resp["warning"])
+                self.refresh()
+                self._detail.load(name)
+            except APIError as e:
+                messagebox.showerror("Error", str(e))
 
     def _edit(self):
         name = self._selected_name()
@@ -330,6 +354,64 @@ class _ClientDetailPanel(tk.Frame):
         self._locker_lbl.config(text="No locker assigned.")
 
 
+class _AddPlanDialog(tk.Toplevel):
+    """Add a subscription plan to an existing client (re-enroll)."""
+    def __init__(self, parent, client_name: str, subs: list):
+        super().__init__(parent)
+        self.title(f"Add Plan — {client_name}")
+        self.configure(bg="white")
+        self.resizable(False, False)
+        self.grab_set()
+        self.result = None
+
+        frame = tk.Frame(self, bg="white", padx=20, pady=16)
+        frame.pack(fill="both", expand=True)
+
+        tk.Label(frame, text=f"Add Plan: {client_name}",
+                 font=("", 11, "bold"), bg="white",
+                 fg="#0F6E56").grid(row=0, column=0, columnspan=2,
+                                    sticky="w", pady=(0, 12))
+        tk.Label(frame,
+                 text="Adds days on top of any existing subscription.",
+                 font=("", 9), fg="#666", bg="white").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(0, 10))
+
+        tk.Label(frame, text="Subscription:", bg="white",
+                 font=("", 9)).grid(row=2, column=0, sticky="w", pady=6)
+        self._sub_var = tk.StringVar()
+        cb = ttk.Combobox(frame, textvariable=self._sub_var,
+                          values=[s["subscription_name"] for s in subs],
+                          state="readonly", width=25)
+        cb.grid(row=2, column=1, padx=(10, 0), pady=6)
+        if subs:
+            cb.current(0)
+
+        self._err = tk.Label(frame, text="", fg="red",
+                             bg="white", font=("", 9))
+        self._err.grid(row=3, column=0, columnspan=2,
+                       sticky="w", pady=(4, 0))
+
+        btn_row = tk.Frame(frame, bg="white")
+        btn_row.grid(row=4, column=0, columnspan=2,
+                     pady=(14, 0), sticky="e")
+        tk.Button(btn_row, text="Cancel", command=self.destroy,
+                  relief="flat", padx=12, pady=6,
+                  bg="#f0f0f0").pack(side="right", padx=(6, 0))
+        tk.Button(btn_row, text="Add Plan",
+                  command=self._save,
+                  relief="flat", padx=12, pady=6,
+                  bg="#0F6E56", fg="white").pack(side="right")
+        self.wait_window()
+
+    def _save(self):
+        sub = self._sub_var.get()
+        if not sub:
+            self._err.config(text="Select a plan.")
+            return
+        self.result = sub
+        self.destroy()
+
+
 class _EnrollDialog(tk.Toplevel):
     """
     Phase 1: fill details + subscription -> Enroll.
@@ -465,6 +547,7 @@ class _EnrollDialog(tk.Toplevel):
         self._fp_status.config(text="Place finger on scanner 3 times...",
                                fg="#185FA5")
         import threading
+        self._check_fp_progress()   # start polling on main thread
         threading.Thread(target=self._fp_worker,
                          args=(name,), daemon=True).start()
 
@@ -476,6 +559,51 @@ class _EnrollDialog(tk.Toplevel):
         except Exception as e:
             msg = str(e)
             self.after(0, lambda: self._fp_done_err(msg))
+        try:
+            from fapp.api_client import api
+            api.enroll_fingerprint(name)
+            self.after(0, self._fp_done_ok)
+        except Exception as e:
+            msg = str(e)
+            self.after(0, lambda: self._fp_done_err(msg))
+
+    def _check_fp_progress(self):
+        import threading
+        threading.Thread(target=self._fetch_fp_progress, daemon=True).start()
+
+    def _fetch_fp_progress(self):
+        try:
+            import requests as _req
+            from fapp.api_client import BASE_URL, api
+            r = _req.get(
+                f"{BASE_URL}/clients/enroll-fingerprint/progress",
+                headers={"Authorization": f"Bearer {api._token}"},
+                timeout=2,
+            )
+            if r.status_code == 200:
+                n = r.json().get("progress", 0)
+                if n > 0:
+                    self.after(0, lambda v=n: self._apply_fp_progress(v))
+                    return
+        except Exception:
+            pass
+        self.after(0, self._maybe_continue_fp_poll)
+
+    def _apply_fp_progress(self, n):
+        try:
+            self._fp_status.config(
+                text=f"Scan {n}/3 — lift finger, scan again...",
+                fg="#185FA5")
+        except Exception:
+            pass
+        self._maybe_continue_fp_poll()
+
+    def _maybe_continue_fp_poll(self):
+        try:
+            if str(self._fp_btn.cget("state")) == "disabled":
+                self.after(200, self._check_fp_progress)
+        except Exception:
+            pass
 
     def _fp_done_ok(self):
         self._fp_status.config(text="Fingerprint enrolled.", fg="#0F6E56")
@@ -555,22 +683,65 @@ class _EditDialog(tk.Toplevel):
         self._fp_btn.config(state="disabled", text="Scanning...")
         self._fp_status.config(text="Place finger 3 times...", fg="#185FA5")
         import threading
+        self._check_fp_progress()   # start polling on main thread
         threading.Thread(target=self._fp_worker, daemon=True).start()
 
     def _fp_worker(self):
         try:
             from fapp.api_client import api
             api.enroll_fingerprint(self._client_name)
-            self.after(0, lambda: self._fp_status.config(
-                text="Fingerprint updated.", fg="#0F6E56"))
-            self.after(0, lambda: self._fp_btn.config(
-                state="normal", text="Re-scan Fingerprint"))
+            def _ok():
+                try:
+                    self._fp_status.config(text="Fingerprint updated.", fg="#0F6E56")
+                    self._fp_btn.config(state="normal", text="Re-scan Fingerprint")
+                except Exception: pass
+            self.after(0, _ok)
         except Exception as e:
             msg = str(e)
-            self.after(0, lambda: self._fp_status.config(
-                text=f"Failed: {msg}", fg="red"))
-            self.after(0, lambda: self._fp_btn.config(
-                state="normal", text="Try Again"))
+            def _err():
+                try:
+                    self._fp_status.config(text=f"Failed: {msg}", fg="red")
+                    self._fp_btn.config(state="normal", text="Try Again")
+                except Exception: pass
+            self.after(0, _err)
+
+    def _check_fp_progress(self):
+        import threading
+        threading.Thread(target=self._fetch_fp_progress, daemon=True).start()
+
+    def _fetch_fp_progress(self):
+        try:
+            import requests as _req
+            from fapp.api_client import BASE_URL, api
+            r = _req.get(
+                f"{BASE_URL}/clients/enroll-fingerprint/progress",
+                headers={"Authorization": f"Bearer {api._token}"},
+                timeout=2,
+            )
+            if r.status_code == 200:
+                n = r.json().get("progress", 0)
+                if n > 0:
+                    self.after(0, lambda v=n: self._apply_fp_progress(v))
+                    return
+        except Exception:
+            pass
+        self.after(0, self._maybe_continue_fp_poll)
+
+    def _apply_fp_progress(self, n):
+        try:
+            self._fp_status.config(
+                text=f"Scan {n}/3 — lift finger, scan again...",
+                fg="#185FA5")
+        except Exception:
+            pass
+        self._maybe_continue_fp_poll()
+
+    def _maybe_continue_fp_poll(self):
+        try:
+            if str(self._fp_btn.cget("state")) == "disabled":
+                self.after(200, self._check_fp_progress)
+        except Exception:
+            pass
 
     def _save(self):
         self.result = {

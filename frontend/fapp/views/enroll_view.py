@@ -331,6 +331,7 @@ class EnrollView(tk.Frame):
             text=f"Place finger on scanner 3 times for '{name}'...",
             fg="#185FA5")
         import threading
+        self._poll_fp_progress()   # start polling on main thread before worker starts
         threading.Thread(target=self._enroll_fp_worker,
                          args=(name,), daemon=True).start()
 
@@ -341,6 +342,54 @@ class EnrollView(tk.Frame):
         except Exception as e:
             msg = str(e)
             self.after(0, lambda: self._fp_error(msg))
+
+    def _poll_fp_progress(self):
+        """Start polling scan count in background thread."""
+        self._fp_polling = True
+        self._do_fp_poll()
+
+    def _do_fp_poll(self):
+        """Fire one background poll, schedule next if still enrolling."""
+        import threading
+        threading.Thread(target=self._fetch_progress, daemon=True).start()
+
+    def _fetch_progress(self):
+        """Background thread: fetch progress, post result to main thread."""
+        try:
+            import requests as _req
+            from fapp.api_client import BASE_URL, api
+            r = _req.get(
+                f"{BASE_URL}/clients/enroll-fingerprint/progress",
+                headers={"Authorization": f"Bearer {api._token}"},
+                timeout=2,
+            )
+            if r.status_code == 200:
+                n = r.json().get("progress", 0)
+                self.after(0, lambda: self._apply_progress(n))
+                return
+        except Exception:
+            pass
+        # On error, keep polling if button still disabled
+        self.after(0, self._maybe_continue_poll)
+
+    def _apply_progress(self, n: int):
+        """Called on main thread with latest progress value."""
+        if n > 0:
+            self._enroll_status.config(
+                text=f"Scan {n}/3 captured \u2014 lift finger, place again...",
+                fg="#185FA5")
+            self._fp_btn.config(text=f"Scanning... ({n}/3)")
+        elif n == -1:
+            return  # error handled by _fp_error
+        self._maybe_continue_poll()
+
+    def _maybe_continue_poll(self):
+        """Continue polling if enrollment is still running."""
+        try:
+            if str(self._fp_btn.cget("state")) == "disabled":
+                self.after(200, self._do_fp_poll)
+        except Exception:
+            pass
 
     def _fp_success(self):
         self._enroll_status.config(

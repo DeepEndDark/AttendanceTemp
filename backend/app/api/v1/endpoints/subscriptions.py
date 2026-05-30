@@ -3,7 +3,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.api.dependencies import require_admin, require_any
 from app.core.firestore_client import subscriptions
 from app.schemas.subscription import SubscriptionCreate, SubscriptionRead, SubscriptionUpdate
+from pydantic import BaseModel
 from app.schemas.token import TokenData
+
+class RenamePayload(BaseModel):
+    new_name: str
 
 router = APIRouter(prefix="/subscriptions", tags=["subscriptions"])
 
@@ -59,3 +63,43 @@ def delete_subscription(name: str, _: TokenData = Depends(require_admin)):
     if not ref.get().exists:
         raise HTTPException(status_code=404, detail="Subscription not found")
     ref.delete()
+
+
+@router.post("/{name}/rename", response_model=SubscriptionRead)
+def rename_subscription(name: str,
+                        payload: RenamePayload,
+                        _: TokenData = Depends(require_admin)):
+    """
+    Rename a subscription plan.
+    Creates new doc with new name, copies data, deletes old.
+    Updates subscription_name field on all client sub records.
+    """
+    new_name = payload.new_name.strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="new_name required")
+    if new_name == name:
+        raise HTTPException(status_code=400, detail="New name is same as current")
+
+    old_ref = subscriptions().document(name)
+    old_doc = old_ref.get()
+    if not old_doc.exists:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+
+    new_ref = subscriptions().document(new_name)
+    if new_ref.get().exists:
+        raise HTTPException(status_code=409, detail="Name already taken")
+
+    from app.core.firestore_client import client_subs, clients as clients_col
+    data = old_doc.to_dict()
+    data["subscription_name"] = new_name
+    new_ref.set(data)
+    old_ref.delete()
+
+    # Update all client subscription records referencing old name
+    for client_doc in clients_col().stream():
+        cname = client_doc.id
+        for sub_doc in client_subs(cname).where(
+                "subscription_name", "==", name).stream():
+            sub_doc.reference.update({"subscription_name": new_name})
+
+    return _to_read(data)

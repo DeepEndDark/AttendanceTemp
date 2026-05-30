@@ -35,7 +35,7 @@ class ClientRead(BaseModel):
     contact_number: str | None
     address: str | None
     client_status: bool
-    client_current_uid_log: int
+    client_current_uid_log: int | None = None
     client_current_sale_uid: int
     client_days_remaining: int
     client_trainer_days_remaining: int

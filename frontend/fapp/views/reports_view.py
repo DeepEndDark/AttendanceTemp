@@ -44,10 +44,12 @@ class _DailyReportTab(tk.Frame):
 
         tk.Label(ctrl, text="Date (YYYY-MM-DD):",
                  bg="white").pack(side="left")
-        self._date_var = tk.StringVar(
-            value=(date.today() - timedelta(days=1)).isoformat())
+        self._date_var = tk.StringVar(value=date.today().isoformat())
         tk.Entry(ctrl, textvariable=self._date_var,
                  width=14).pack(side="left", padx=6)
+        tk.Button(ctrl, text="Today",
+                  command=lambda: self._date_var.set(date.today().isoformat()),
+                  relief="flat", padx=8).pack(side="left", padx=2)
         tk.Button(ctrl, text="Load", command=self._load,
                   bg="#185FA5", fg="white",
                   relief="flat", padx=10).pack(side="left", padx=4)

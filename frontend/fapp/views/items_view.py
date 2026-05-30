@@ -21,6 +21,8 @@ class ItemsView(tk.Frame):
         tk.Button(bar, text="Delete", command=self._delete,
                   bg="#e04040", fg="white",
                   relief="flat", padx=10).pack(side="right", padx=4)
+        tk.Button(bar, text="Rename", command=self._rename,
+                  relief="flat", padx=10).pack(side="right", padx=4)
         tk.Button(bar, text="Edit", command=self._edit,
                   relief="flat", padx=10).pack(side="right", padx=4)
         tk.Button(bar, text="Add Item", command=self._add,
@@ -82,6 +84,21 @@ class ItemsView(tk.Frame):
                 self.refresh()
             except APIError as e:
                 messagebox.showerror("Error", str(e))
+
+    def _rename(self):
+        name = self._selected_name()
+        if not name:
+            return
+        from tkinter import simpledialog
+        new_name = simpledialog.askstring(
+            "Rename Item", f"Rename '{name}' to:", parent=self)
+        if not new_name or new_name.strip() == name:
+            return
+        try:
+            api.rename_item(name, new_name.strip())
+            self.refresh()
+        except APIError as e:
+            messagebox.showerror("Error", str(e))
 
     def _edit(self):
         name = self._selected_name()

@@ -1,8 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.router import api_router
-from app.core.daily_tick import run_tick
+from app.core.daily_tick import run_tick, auto_timeout_stale_sessions, start_nightly_timeout_scheduler
 from app.core.fingerprint import load_templates
+import logging
+
+logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(
     title="Attendance & Sales System",
@@ -28,6 +31,8 @@ def on_startup():
     _seed()
     # Run daily tick (handles catch-up if app was offline)
     run_tick()
+    auto_timeout_stale_sessions()   # catch-up: close any stale sessions from prev days
+    start_nightly_timeout_scheduler()  # schedule 9 PM auto-timeout daily
     # Load fingerprint templates into memory
     load_templates()
 

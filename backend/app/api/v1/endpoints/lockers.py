@@ -265,3 +265,28 @@ def get_client_rentals(client_name: str,
               .where("client_name", "==", client_name)
               .order_by("rented_at", direction="DESCENDING")
               .stream()]
+
+
+# ── Unassign locker (admin only) ──────────────────────────────
+
+@router.delete("/unassign/{locker_number}", status_code=200)
+def unassign_locker(locker_number: int,
+                    _: TokenData = Depends(require_admin)):
+    """
+    Admin only. Removes locker from client immediately.
+    Remaining days are forfeited -- no refund recorded.
+    """
+    # Find the client holding this locker
+    results = list(
+        clients().where("locker_number", "==", locker_number).stream())
+    if not results:
+        raise HTTPException(status_code=404,
+                            detail=f"Locker #{locker_number} is not assigned.")
+
+    client_ref = results[0].reference
+    client_ref.update({
+        "locker_number":               None,
+        "client_locker_days_remaining": 0,
+    })
+    return {"unassigned": locker_number,
+            "client_name": results[0].to_dict().get("client_name")}

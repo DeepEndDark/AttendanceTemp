@@ -345,3 +345,10 @@ def enroll_fingerprint(client_name: str,
     ref.update({"fingerprint_template": template})
     update_template_cache(client_name, template)
     return _doc_to_read(ref.get().to_dict())
+
+
+@router.get("/enroll-fingerprint/progress")
+def enroll_progress(_: TokenData = Depends(require_any)):
+    """Returns current enrollment scan count: 0=idle, 1-3=scanning, -1=failed."""
+    from app.core.fingerprint import get_enroll_progress
+    return {"progress": get_enroll_progress()}
