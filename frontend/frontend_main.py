@@ -8,6 +8,16 @@ import threading
 import time
 import tkinter as tk
 from tkinter import ttk
+import os
+import sys
+
+def resource_path(relative_path: str) -> str:
+    
+
+    if getattr(sys, "frozen", False):
+        return os.path.join(sys._MEIPASS, relative_path)
+
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
 
 from fapp.api_client import api
 from fapp.views.client_display import ClientDisplayWindow
@@ -16,10 +26,20 @@ from fapp.views.client_display import ClientDisplayWindow
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Attendance & Sales System")
+        self.title("Tiger Fitness Gym")
         self.geometry("1100x680")
         self.minsize(860, 540)
         self._display_queue: queue.Queue = queue.Queue()
+        try:
+            icon_path = resource_path("assets/app_icon.ico")
+            icon_path = os.path.normpath(icon_path)
+
+            if os.path.exists(icon_path):
+                self.iconbitmap(default=icon_path)
+
+        except Exception as e:
+            print(f"Window icon load failed: {e}")
+
         self._client_win: ClientDisplayWindow | None = None
         self._current_view = None
         self._view_cache: dict = {}
@@ -27,6 +47,7 @@ class App(tk.Tk):
         self._view_classes: dict = {}
         self._scanner_stop = threading.Event()
         self._show_login()
+
 
     # ── Login ────────────────────────────────────────────────
 
@@ -115,7 +136,6 @@ class App(tk.Tk):
         else:
             nav_items = [
                 ("Enroll Client",     EnrollView),
-                ("Client List",       ClientsView),
                 ("Sales",             SalesOpenView),
                 ("Locker Management", LockerView),
             ]

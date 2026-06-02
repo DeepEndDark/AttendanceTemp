@@ -16,6 +16,7 @@ class LockerView(tk.Frame):
         super().__init__(master, bg="white")
         self._is_admin = False
         self._locker_data: dict[int, dict] = {}   # locker_num -> client data
+        self._locker_buttons: dict[int, tk.Button] = {}
         self._total = 0
         self._build()
 
@@ -131,9 +132,32 @@ class LockerView(tk.Frame):
         self._status.config(
             text=f"{avail['rented']} locker(s) rented")
 
+    def _style_locker_button(self, num: int):
+        """
+        Apply visual selected-state styling to one locker button only.
+        Does not rebuild the grid.
+        """
+        btn = self._locker_buttons.get(num)
+        if btn is None:
+            return
+
+        selected = (num == self._selected_locker)
+
+        btn.config(
+            relief="sunken" if selected else "raised",
+            bd=3,
+            font=("", 8, "bold" if selected else "normal"),
+            highlightthickness=2,
+            highlightbackground="#FFD54F" if selected else "white",
+            highlightcolor="#FFD54F" if selected else "white",
+            activebackground=btn.cget("bg"),
+        )
+
     def _rebuild_grid(self):
         for w in self._grid_frame.winfo_children():
             w.destroy()
+
+        self._locker_buttons.clear()
 
         for i in range(self._total):
             num = i + 1
@@ -158,14 +182,20 @@ class LockerView(tk.Frame):
                 self._grid_frame,
                 text=label,
                 bg=bg, fg=fg,
-                font=("", 8),
-                relief="raised", bd=2,
                 width=9, height=3,
                 command=lambda n=num: self._on_locker_click(n))
-            btn.grid(row=row, column=col, padx=4, pady=4)
+            self._locker_buttons[num] = btn
+            self._style_locker_button(num)
+            btn.grid(row=row, column=col, padx=7, pady=7)
 
     def _on_locker_click(self, num: int):
+        previous = self._selected_locker
         self._selected_locker = num
+
+        if previous is not None and previous != num:
+            self._style_locker_button(previous)
+        self._style_locker_button(num)
+
         c = self._locker_data.get(num)
         if c:
             self._status.config(
@@ -242,8 +272,14 @@ class LockerView(tk.Frame):
             name_short = c["client_name"][:10] + "…" \
                 if len(c["client_name"]) > 10 else c["client_name"]
             label = f"#{num}\n{name_short}\n{days}d"
-        for widget in self._grid_frame.grid_slaves(row=row, column=col):
-            widget.config(text=label, bg=bg, fg=fg)
+        btn = self._locker_buttons.get(num)
+        if btn is not None:
+            btn.config(text=label, bg=bg, fg=fg)
+            self._style_locker_button(num)
+        else:
+            # Fallback only if the button registry is unexpectedly missing.
+            for widget in self._grid_frame.grid_slaves(row=row, column=col):
+                widget.config(text=label, bg=bg, fg=fg)
         # Update availability summary count
         rented = len(self._locker_data)
         avail = self._total - rented
@@ -276,6 +312,7 @@ class LockerView(tk.Frame):
             api.unassign_locker(self._selected_locker)
             num = self._selected_locker
             self._selected_locker = None
+            self._style_locker_button(num)
             self._status.config(text=f"Locker #{num} unassigned.", fg="gray")
             self._refresh_tile(num)
         except APIError as e:
