@@ -30,6 +30,7 @@ class App(tk.Tk):
         self.geometry("1100x680")
         self.minsize(860, 540)
         self._display_queue: queue.Queue = queue.Queue()
+        self._att_queue:     queue.Queue = queue.Queue()
         try:
             icon_path = resource_path("assets/app_icon.ico")
             icon_path = os.path.normpath(icon_path)
@@ -175,15 +176,20 @@ class App(tk.Tk):
 
         if label not in self._view_cache:
             ViewClass = self._view_classes[label]
-            view = ViewClass(self._content,
-                             display_queue=self._display_queue)
+            import inspect
+            sig = inspect.signature(ViewClass.__init__)
+            kwargs = {"display_queue": self._display_queue}
+            if "att_queue" in sig.parameters or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD
+                for p in sig.parameters.values()
+            ):
+                kwargs["att_queue"] = self._att_queue
+            view = ViewClass(self._content, **kwargs)
             view.pack(fill="both", expand=True)
             self._view_cache[label] = view
         else:
             view = self._view_cache[label]
             view.pack(fill="both", expand=True)
-            if hasattr(view, "refresh"):
-                view.refresh()
 
         self._current_view = view
 
@@ -194,16 +200,28 @@ class App(tk.Tk):
         Stage 2 — show "Reading..." banner only after finger is detected.
         Stage 3 — /scan: FID already in queue, returns fast with result.
         """
+        import time as _time
+
         while not self._scanner_stop.is_set():
+
+            # Backoff guard — if finger_touch returns in under 1s the scanner
+            # is unavailable and returning immediately. Sleep 5s to avoid
+            # hammering the backend with tight-loop requests.
+            _t0 = _time.monotonic()
 
             # Stage 1 — wait for physical touch, client stays idle
             touched = api.finger_touch()
+
+            elapsed = _time.monotonic() - _t0
 
             if self._scanner_stop.is_set():
                 break
 
             if not touched:
-                # Timeout (30 s, no finger) — loop and wait again
+                if elapsed < 1.0:
+                    # Scanner unavailable — returned instantly, back off
+                    _time.sleep(5.0)
+                # else: normal 30s timeout, retry immediately
                 continue
 
             # Stage 2 — finger detected, show "Reading..." now
@@ -221,10 +239,14 @@ class App(tk.Tk):
 
             if event:
                 self._display_queue.put(event)
+                # Signal attendance view to refresh if a time-in/out occurred
+                if event.get("type") in ("time_in", "time_out",
+                                         "expiry_warn", "expired"):
+                    self._att_queue.put(True)
             else:
                 # Network / auth error
                 self._display_queue.put({"type": "clear"})
-                time.sleep(1)
+                _time.sleep(1)
 
     def _logout(self):
         self._scanner_stop.set()

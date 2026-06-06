@@ -109,7 +109,10 @@ def start_nightly_timeout_scheduler() -> None:
             current  = datetime.now()
             if current >= next_9pm:
                 # Already past 9 PM today — schedule for tomorrow
-                next_9pm = datetime(now.year, now.month, now.day + 1, 21, 0, 0)
+                from datetime import timedelta as _td
+                tomorrow = (now + _td(days=1))
+                next_9pm = datetime(tomorrow.year, tomorrow.month,
+                                    tomorrow.day, 21, 0, 0)
             wait_secs = (next_9pm - current).total_seconds()
             log.info(f"Nightly timeout scheduler: next run in "
                      f"{wait_secs/3600:.1f}h at {next_9pm.strftime('%H:%M')}")
@@ -139,6 +142,7 @@ def _tick_client(client_name: str, days: int) -> None:
 
     if active_subs:
         batch = db.batch()
+        post_tick = {}   # sub_id -> updated dict, to avoid second stream
         for s in active_subs:
             d = s.to_dict()
             days_rem    = max(0, d.get("days_remaining", 0) - days)
@@ -146,34 +150,31 @@ def _tick_client(client_name: str, days: int) -> None:
             trainer_rem = d.get("trainer_days_remaining", 0)
             is_active   = days_rem > 0
 
-            # Tick hardcap independently — zeroes trainer days if hit
             if d.get("has_trainer", False) and hardcap_rem > 0:
                 hardcap_rem = max(0, hardcap_rem - days)
                 if hardcap_rem == 0:
                     trainer_rem = 0
 
-            batch.update(s.reference, {
-                "days_remaining":          days_rem,
-                "trainer_days_remaining":  trainer_rem,
+            updated = {
+                "days_remaining":            days_rem,
+                "trainer_days_remaining":    trainer_rem,
                 "trainer_hardcap_remaining": hardcap_rem,
-                "is_active":               is_active,
-            })
+                "is_active":                 is_active,
+            }
+            batch.update(s.reference, updated)
+            post_tick[s.id] = {**d, **updated}
         batch.commit()
+    else:
+        post_tick = {}
 
-    # ── Recalculate client totals from active subs ────────────
-    still_active = list(
-        client_subs(client_name).where("is_active", "==", True).stream()
-    )
-    total_days    = sum(s.to_dict().get("days_remaining", 0)
-                        for s in still_active)
-    total_trainer = sum(s.to_dict().get("trainer_days_remaining", 0)
-                        for s in still_active)
-
-    # Last plan expiry — furthest expires_at among still-active subs
-    expiry_dates = [s.to_dict().get("expires_at", "")
-                    for s in still_active
-                    if s.to_dict().get("expires_at")]
-    last_expires = max(expiry_dates) if expiry_dates else None
+    # ── Recalculate client totals from post-tick data ─────────
+    # Use the already-fetched + updated values — no second Firestore read.
+    still_active_data = [v for v in post_tick.values() if v.get("is_active")]
+    total_days    = sum(v.get("days_remaining", 0)         for v in still_active_data)
+    total_trainer = sum(v.get("trainer_days_remaining", 0) for v in still_active_data)
+    expiry_dates  = [v.get("expires_at", "") for v in still_active_data
+                     if v.get("expires_at")]
+    last_expires  = max(expiry_dates) if expiry_dates else None
 
     # ── Tick locker ───────────────────────────────────────────
     locker_days = client_data.get("client_locker_days_remaining", 0)

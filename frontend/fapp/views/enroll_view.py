@@ -9,11 +9,13 @@ from fapp.api_client import api, APIError
 
 
 class EnrollView(tk.Frame):
-    def __init__(self, master, display_queue=None):
+    def __init__(self, master, display_queue=None, att_queue=None, **kwargs):
         super().__init__(master, bg="white")
-        self._queue = display_queue
+        self._queue     = display_queue
+        self._att_queue = att_queue
         self._subs: list[dict] = []
         self._build()
+        self._poll_att_queue()
 
     def _build(self):
         self.columnconfigure(0, weight=1)
@@ -185,6 +187,19 @@ class EnrollView(tk.Frame):
 
         self._load_clients()
 
+    # ── Queue polling ─────────────────────────────────────────
+
+    def _poll_att_queue(self):
+        """Refresh active clients list whenever a scan event occurs."""
+        if self._att_queue:
+            try:
+                while True:
+                    self._att_queue.get_nowait()
+                    self._load_clients()
+            except Exception:
+                pass
+        self.after(500, self._poll_att_queue)
+
     # ── Loaders ───────────────────────────────────────────────
 
     def _load_subs(self):
@@ -238,13 +253,16 @@ class EnrollView(tk.Frame):
             self._att_cb["values"] = names
             if names and not self._att_var.get():
                 self._att_var.set(names[0])
+
+            # Use list_active_clients() — always live, never cached.
+            # list_clients() from cache can be stale right after a time-in/out.
+            active = api.list_active_clients()
             self._active_tree.delete(*self._active_tree.get_children())
-            for c in all_clients:
-                if c.get("client_status"):
-                    tag = "warn" if c["client_days_remaining"] <= 2 else ""
-                    self._active_tree.insert("", "end", tags=(tag,),
-                                             values=(c["client_name"],
-                                                     c["client_days_remaining"]))
+            for c in active:
+                tag = "warn" if c["client_days_remaining"] <= 2 else ""
+                self._active_tree.insert("", "end", tags=(tag,),
+                                         values=(c["client_name"],
+                                                 c["client_days_remaining"]))
             avail = api.get_locker_availability()
             self._locker_lbl.config(
                 text=f"Lockers: {avail['available']}/{avail['total']} available  "

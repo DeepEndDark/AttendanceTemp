@@ -162,12 +162,21 @@ def _delete_sale_doc(
 
             if cdata.get("client_current_sale_uid") == uid:
                 client_ref.update({
-                    "client_current_sale_uid": 0
+                    "client_current_sale_uid": None
                 })
 
-    # Delete item subcollection docs first.
+    # Delete item subcollection docs in a batch.
+    batch = db.batch()
+    batch_count = 0
     for item_doc in sale_ref.collection("items").stream():
-        item_doc.reference.delete()
+        batch.delete(item_doc.reference)
+        batch_count += 1
+        if batch_count >= 500:
+            batch.commit()
+            batch = db.batch()
+            batch_count = 0
+    if batch_count:
+        batch.commit()
 
     # Delete sale doc.
     sale_ref.delete()
@@ -216,6 +225,17 @@ def _collect_sale_headers(
     if status_filter and status_filter != "all":
         query = query.where("sale_status", "==", status_filter)
 
+    # Push date filters to Firestore to avoid full collection scan
+    if date_exact:
+        query = query.where("sale_date", "==", date_exact)
+    elif date_from and date_to:
+        query = query.where("sale_date", ">=", date_from) \
+                     .where("sale_date", "<=", date_to)
+    elif date_from:
+        query = query.where("sale_date", ">=", date_from)
+    elif date_to:
+        query = query.where("sale_date", "<=", date_to)
+
     results = []
 
     for doc in query.stream():
@@ -227,12 +247,11 @@ def _collect_sale_headers(
         d_str = data.get("sale_date") or _sale_date_from_ref(doc.reference)
         data["sale_date"] = d_str
 
+        # Client-side safety filters for legacy docs
         if date_exact and d_str != date_exact:
             continue
-
         if date_from and d_str < date_from:
             continue
-
         if date_to and d_str > date_to:
             continue
 
@@ -531,7 +550,7 @@ def close_sale(uid: int, _: TokenData = Depends(require_any)):
 
     if client_doc.exists:
         client_ref.update({
-            "client_current_sale_uid": 0
+            "client_current_sale_uid": None
         })
 
     updated, _ = _fetch_sale_by_uid(uid)

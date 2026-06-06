@@ -1,6 +1,8 @@
 """Sales role — open sales for active (timed-in) clients only."""
+import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
+
 from fapp.api_client import api, APIError
 
 
@@ -9,6 +11,10 @@ class SalesOpenView(tk.Frame):
         super().__init__(master, bg="white")
         self._queue = display_queue
         self._selected_uid: int | None = None
+        self._all_sales: list[dict] = []
+        self._sale_map: dict[int, dict] = {}
+        self._loading = False
+        self._detail_loading_uid: int | None = None
         self._build()
 
     def _build(self):
@@ -34,6 +40,7 @@ class SalesOpenView(tk.Frame):
         split.columnconfigure(1, weight=3)
         split.rowconfigure(0, weight=1)
 
+        # ── Left: open sales list ─────────────────────────────
         left = tk.LabelFrame(split, text="Open sales", bg="white")
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         left.rowconfigure(0, weight=1)
@@ -54,6 +61,7 @@ class SalesOpenView(tk.Frame):
         sb.grid(row=0, column=1, sticky="ns")
         self._sale_tree.bind("<<TreeviewSelect>>", self._on_select)
 
+        # ── Right: cart ───────────────────────────────────────
         right = tk.LabelFrame(split, text="Items in selected sale",
                               bg="white")
         right.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
@@ -106,95 +114,226 @@ class SalesOpenView(tk.Frame):
 
         self.refresh()
 
-    def refresh(self):
-        self._load_catalogue()
-        self._load_open_sales()
+    # ---------------------------------------------------------
+    # Async helpers
+    # ---------------------------------------------------------
 
-    def _load_catalogue(self):
+    def _set_loading(self, value: bool, text: str | None = None):
+        self._loading = value
+        if text is not None:
+            self._status.config(text=text)
+
+    def _run_worker(self, target, name: str):
+        threading.Thread(target=target, daemon=True, name=name).start()
+
+    def _show_error(self, message: str):
+        self._set_loading(False, message)
+
+    # ---------------------------------------------------------
+    # Refresh — headers only, background
+    # ---------------------------------------------------------
+
+    def refresh(self):
+        if self._loading:
+            return
+
+        self._selected_uid = None
+        self._item_tree.delete(*self._item_tree.get_children())
+        self._total_lbl.config(text="Total: ₱0.00")
+        self._set_loading(True, "Loading sales...")
+
+        self._run_worker(self._refresh_worker, "open-sales-refresh")
+
+    def _refresh_worker(self):
         try:
             items = api.list_items()
-            names = [i["item_name"]
-                     for i in items if i.get("available_stock", 0) > 0]
-            self._item_cb["values"] = names
-            if names:
-                self._item_cb.current(0)
-        except APIError:
-            pass
-
-    def _load_open_sales(self):
-        self._sale_tree.delete(*self._sale_tree.get_children())
-        try:
             active = {c["client_name"] for c in api.list_active_clients()}
-            sales = api.list_open_sales()
-            shown = 0
-            for s in sales:
-                if s["client_name"] in active:
-                    self._sale_tree.insert("", "end",
-                                          iid=str(s["sales_uid"]),
-                                          values=(s["sales_uid"],
-                                                  s["client_name"],
-                                                  f"{s['total_price']:.2f}"))
-                    shown += 1
-            self._status.config(
-                text=f"{shown} open sale(s) for active clients")
+            sales = api.list_open_sales()   # headers only — item_list is []
+
+            self.after(0, lambda: self._refresh_complete(items, active, sales, None))
+
         except APIError as e:
-            self._status.config(text=str(e))
+            msg = str(e)
+            self.after(0, lambda msg=msg: self._show_error(msg))
+        except Exception as e:
+            msg = f"Error: {e}"
+            self.after(0, lambda msg=msg: self._show_error(msg))
+
+    def _refresh_complete(
+        self,
+        items: list[dict],
+        active: set[str],
+        sales: list[dict],
+        preserve_uid: int | None,
+    ):
+        self._item_cb["values"] = [
+            i["item_name"] for i in items if i.get("available_stock", 0) > 0
+        ]
+
+        # Only open sales whose client is currently timed in
+        visible = [s for s in sales if s.get("client_name") in active]
+
+        self._all_sales = visible
+        self._sale_map = {
+            int(s["sales_uid"]): s
+            for s in visible
+            if s.get("sales_uid") is not None
+        }
+
+        self._sale_tree.delete(*self._sale_tree.get_children())
+        for s in visible:
+            self._sale_tree.insert(
+                "", "end",
+                iid=str(s["sales_uid"]),
+                values=(s["sales_uid"], s["client_name"],
+                        f"{s['total_price']:.2f}"),
+            )
+
+        self._status.config(text=f"{len(visible)} open sale(s) for active clients")
+
+        if preserve_uid is not None and self._sale_tree.exists(str(preserve_uid)):
+            self._sale_tree.selection_set(str(preserve_uid))
+            self._sale_tree.focus(str(preserve_uid))
+            self._sale_tree.see(str(preserve_uid))
+            self._selected_uid = preserve_uid
+            self._on_select()
+
+        self._set_loading(False)
+
+    # ---------------------------------------------------------
+    # Selection — show total immediately, load items in background
+    # ---------------------------------------------------------
 
     def _on_select(self, _=None):
         sel = self._sale_tree.selection()
         if not sel:
             return
-        self._selected_uid = int(sel[0])
-        self._load_cart()
-
-    def _load_cart(self):
-        self._item_tree.delete(*self._item_tree.get_children())
-        if self._selected_uid is None:
-            return
         try:
-            for s in api.list_open_sales():
-                if s["sales_uid"] == self._selected_uid:
-                    for si in s.get("item_list", []):
-                        self._item_tree.insert(
-                            "", "end",
-                            values=(si["item_name"], si["item_qty"],
-                                    f"{si['item_total_price']:.2f}"))
-                    self._total_lbl.config(
-                        text=f"Total: ₱{s['total_price']:.2f}")
-                    break
+            uid = int(sel[0])
+        except ValueError:
+            return
+
+        self._selected_uid = uid
+        sale = self._sale_map.get(uid)
+        if not sale:
+            return
+
+        # Show cached total immediately — cart loads behind the scenes
+        self._item_tree.delete(*self._item_tree.get_children())
+        self._total_lbl.config(text=f"Total: ₱{sale.get('total_price', 0):.2f}")
+        self._status.config(text=f"Loading items for sale #{uid}...")
+
+        self._detail_loading_uid = uid
+        self._run_worker(
+            lambda: self._load_detail_worker(uid),
+            "open-sales-load-detail",
+        )
+
+    def _load_detail_worker(self, uid: int):
+        try:
+            sale = api.get_sale(uid)
+            self.after(0, lambda sale=sale, uid=uid: self._detail_loaded(uid, sale))
         except APIError as e:
-            self._status.config(text=str(e))
+            msg = str(e)
+            self.after(0, lambda msg=msg: self._show_error(msg))
+        except Exception as e:
+            msg = f"Error: {e}"
+            self.after(0, lambda msg=msg: self._show_error(msg))
+
+    def _detail_loaded(self, uid: int, sale: dict):
+        # Discard if user already clicked a different sale
+        if self._selected_uid != uid:
+            return
+
+        self._detail_loading_uid = None
+        self._sale_map[uid] = sale
+
+        self._item_tree.delete(*self._item_tree.get_children())
+        for si in sale.get("item_list", []):
+            self._item_tree.insert(
+                "", "end",
+                values=(si.get("item_name", ""),
+                        si.get("item_qty", 0),
+                        f"{si.get('item_total_price', 0):.2f}"),
+            )
+        self._total_lbl.config(text=f"Total: ₱{sale.get('total_price', 0):.2f}")
+        self._status.config(text=f"Sale #{uid} loaded.")
+
+    # ---------------------------------------------------------
+    # Open new sale
+    # ---------------------------------------------------------
 
     def _open_sale(self):
+        if self._loading:
+            return
+        self._set_loading(True, "Loading active clients...")
+        self._run_worker(self._open_sale_worker, "open-sales-load-clients")
+
+    def _open_sale_worker(self):
         try:
             active = api.list_active_clients()
+            self.after(0, lambda: self._open_sale_dialog(active))
         except APIError as e:
-            messagebox.showerror("Error", str(e))
-            return
+            msg = str(e)
+            self.after(0, lambda msg=msg: self._show_error(msg))
+        except Exception as e:
+            msg = f"Error: {e}"
+            self.after(0, lambda msg=msg: self._show_error(msg))
+
+    def _open_sale_dialog(self, active: list[dict]):
+        self._set_loading(False)
         if not active:
             messagebox.showwarning("No active clients",
                                    "No clients are currently timed in.")
             return
         dlg = _PickClient(self, [c["client_name"] for c in active])
-        if dlg.result:
-            try:
-                sale = api.open_sale(dlg.result)
-                self._status.config(
-                    text=f"Opened sale #{sale['sales_uid']} "
-                         f"for {dlg.result}")
-                self.refresh()
-                self._sale_tree.selection_set(str(sale["sales_uid"]))
-                self._selected_uid = sale["sales_uid"]
-                self._load_cart()
-            except APIError as e:
-                messagebox.showerror("Error", str(e))
+        if not dlg.result:
+            return
+
+        client_name = dlg.result
+        self._set_loading(True, f"Opening sale for {client_name}...")
+        self._run_worker(
+            lambda: self._create_sale_worker(client_name),
+            "open-sales-create",
+        )
+
+    def _create_sale_worker(self, client_name: str):
+        try:
+            sale = api.open_sale(client_name)
+            self.after(0, lambda: self._sale_created(sale, client_name))
+        except APIError as e:
+            msg = str(e)
+            self.after(0, lambda msg=msg: self._show_error(msg))
+        except Exception as e:
+            msg = f"Error: {e}"
+            self.after(0, lambda msg=msg: self._show_error(msg))
+
+    def _sale_created(self, sale: dict, client_name: str):
+        uid = sale.get("sales_uid")
+        self._status.config(text=f"Opened sale #{uid} for {client_name}")
+        self._set_loading(False)
+        self._refresh_preserve(uid)
+
+    # ---------------------------------------------------------
+    # Add item
+    # ---------------------------------------------------------
 
     def _add_item(self):
-        if self._selected_uid is None:
-            messagebox.showwarning("No sale",
-                                   "Select or open a sale first.")
+        if self._loading:
             return
-        name = self._item_var.get()
+        if self._selected_uid is None:
+            messagebox.showwarning("No sale", "Select or open a sale first.")
+            return
+        if self._detail_loading_uid == self._selected_uid:
+            messagebox.showinfo("Please Wait",
+                                "Sale items are still loading. Try again in a moment.")
+            return
+        sale = self._sale_map.get(self._selected_uid)
+        if sale and sale.get("sale_status") != "open":
+            messagebox.showwarning("Closed Sale",
+                                   "You can only add items to an open sale.")
+            return
+        name = self._item_var.get().strip()
         if not name:
             return
         try:
@@ -202,60 +341,146 @@ class SalesOpenView(tk.Frame):
             if qty <= 0:
                 raise ValueError
         except ValueError:
-            messagebox.showerror("Invalid",
-                                 "Quantity must be a positive integer.")
+            messagebox.showerror("Invalid", "Quantity must be a positive integer.")
             return
+
+        uid = self._selected_uid
+        self._set_loading(True, "Adding item...")
+        self._run_worker(
+            lambda: self._add_item_worker(uid, name, qty),
+            "open-sales-add-item",
+        )
+
+    def _add_item_worker(self, uid: int, item_name: str, qty: int):
         try:
-            sale = api.add_item_to_sale(self._selected_uid, name, qty)
-            self._status.config(text=f"Added {qty}x {name}")
-            if self._sale_tree.exists(str(self._selected_uid)):
-                self._sale_tree.item(
-                    str(self._selected_uid),
-                    values=(sale["sales_uid"], sale["client_name"],
-                            f"{sale['total_price']:.2f}"))
-            self._load_cart()
+            api.add_item_to_sale(uid, item_name, qty)
+            self.after(0, lambda: self._after_mutation(uid, "Item added."))
         except APIError as e:
-            messagebox.showerror("Error", str(e))
+            msg = str(e)
+            self.after(0, lambda msg=msg: self._show_error(msg))
+        except Exception as e:
+            msg = f"Error: {e}"
+            self.after(0, lambda msg=msg: self._show_error(msg))
+
+    # ---------------------------------------------------------
+    # Remove item
+    # ---------------------------------------------------------
 
     def _remove_item(self):
+        if self._loading:
+            return
         if self._selected_uid is None:
+            return
+        if self._detail_loading_uid == self._selected_uid:
+            messagebox.showinfo("Please Wait",
+                                "Sale items are still loading. Try again in a moment.")
+            return
+        sale = self._sale_map.get(self._selected_uid)
+        if sale and sale.get("sale_status") != "open":
+            messagebox.showwarning("Closed Sale",
+                                   "You can only remove items from an open sale.")
             return
         sel = self._item_tree.selection()
         if not sel:
             messagebox.showwarning("Select", "Select an item to remove.")
             return
         item_name = self._item_tree.item(sel[0])["values"][0]
+        uid = self._selected_uid
+        self._set_loading(True, "Removing item...")
+        self._run_worker(
+            lambda: self._remove_item_worker(uid, item_name),
+            "open-sales-remove-item",
+        )
+
+    def _remove_item_worker(self, uid: int, item_name: str):
         try:
-            sale = api.remove_item_from_sale(self._selected_uid, item_name)
-            self._status.config(text=f"Removed {item_name}")
-            if self._sale_tree.exists(str(self._selected_uid)):
-                self._sale_tree.item(
-                    str(self._selected_uid),
-                    values=(sale["sales_uid"], sale["client_name"],
-                            f"{sale['total_price']:.2f}"))
-            self._load_cart()
+            api.remove_item_from_sale(uid, item_name)
+            self.after(0, lambda: self._after_mutation(uid, "Item removed."))
         except APIError as e:
-            messagebox.showerror("Error", str(e))
+            msg = str(e)
+            self.after(0, lambda msg=msg: self._show_error(msg))
+        except Exception as e:
+            msg = f"Error: {e}"
+            self.after(0, lambda msg=msg: self._show_error(msg))
+
+    # ---------------------------------------------------------
+    # Close sale
+    # ---------------------------------------------------------
 
     def _close_sale(self):
+        if self._loading:
+            return
         if self._selected_uid is None:
             messagebox.showwarning("No sale", "Select a sale to close.")
             return
-        if not messagebox.askyesno(
-                "Confirm",
-                f"Close sale #{self._selected_uid}? "
-                "Stock will be deducted."):
+        sale = self._sale_map.get(self._selected_uid)
+        if sale and sale.get("sale_status") != "open":
+            messagebox.showinfo("Already Closed", "This sale is already closed.")
             return
+        uid = self._selected_uid
+        if not messagebox.askyesno("Confirm",
+                                   f"Close sale #{uid}? Stock will be deducted."):
+            return
+
+        self._set_loading(True, "Closing sale...")
+        self._run_worker(
+            lambda: self._close_sale_worker(uid),
+            "open-sales-close",
+        )
+
+    def _close_sale_worker(self, uid: int):
         try:
-            api.close_sale(self._selected_uid)
-            self._status.config(
-                text=f"Sale #{self._selected_uid} closed.")
-            self._selected_uid = None
-            self._item_tree.delete(*self._item_tree.get_children())
-            self._total_lbl.config(text="Total: ₱0.00")
-            self.refresh()
+            api.close_sale(uid)
+            self.after(0, lambda: self._after_close(uid))
         except APIError as e:
-            messagebox.showerror("Error", str(e))
+            msg = str(e)
+            self.after(0, lambda msg=msg: self._show_error(msg))
+        except Exception as e:
+            msg = f"Error: {e}"
+            self.after(0, lambda msg=msg: self._show_error(msg))
+
+    def _after_close(self, uid: int):
+        self._selected_uid = None
+        self._item_tree.delete(*self._item_tree.get_children())
+        self._total_lbl.config(text="Total: ₱0.00")
+        self._status.config(text=f"Sale #{uid} closed.")
+        self._set_loading(False)
+        self._refresh_preserve(None)
+
+    # ---------------------------------------------------------
+    # Shared post-mutation: reload detail for current sale
+    # ---------------------------------------------------------
+
+    def _after_mutation(self, uid: int, status: str):
+        self._status.config(text=status)
+        self._set_loading(False)
+        self._refresh_preserve(uid)
+
+    # ---------------------------------------------------------
+    # Refresh preserving selection
+    # ---------------------------------------------------------
+
+    def _refresh_preserve(self, uid: int | None):
+        if self._loading:
+            return
+        self._set_loading(True, "Refreshing sales...")
+        self._run_worker(
+            lambda: self._refresh_preserve_worker(uid),
+            "open-sales-refresh-preserve",
+        )
+
+    def _refresh_preserve_worker(self, uid: int | None):
+        try:
+            items = api.list_items()
+            active = {c["client_name"] for c in api.list_active_clients()}
+            sales = api.list_open_sales()
+            self.after(0, lambda: self._refresh_complete(items, active, sales, uid))
+        except APIError as e:
+            msg = str(e)
+            self.after(0, lambda msg=msg: self._show_error(msg))
+        except Exception as e:
+            msg = f"Error: {e}"
+            self.after(0, lambda msg=msg: self._show_error(msg))
 
 
 class _PickClient(tk.Toplevel):

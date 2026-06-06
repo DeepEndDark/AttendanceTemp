@@ -41,8 +41,8 @@ def _doc_to_read(d: dict) -> ClientRead:
         contact_number=d.get("contact_number"),
         address=d.get("address"),
         client_status=d.get("client_status", False),
-        client_current_uid_log=d.get("client_current_uid_log", 0),
-        client_current_sale_uid=d.get("client_current_sale_uid", 0),
+        client_current_uid_log=d.get("client_current_uid_log"),
+        client_current_sale_uid=d.get("client_current_sale_uid"),
         client_days_remaining=d.get("client_days_remaining", 0),
         client_trainer_days_remaining=d.get(
             "client_trainer_days_remaining", 0),
@@ -98,6 +98,13 @@ def list_clients(_: TokenData = Depends(require_any)):
 def list_active_clients(_: TokenData = Depends(require_any)):
     return [_doc_to_read(d.to_dict())
             for d in clients().where("client_status", "==", True).stream()]
+
+
+@router.get("/enroll-fingerprint/progress")
+def enroll_progress(_: TokenData = Depends(require_any)):
+    """Returns current enrollment scan count: 0=idle, 1-3=scanning, -1=failed."""
+    from app.core.fingerprint import get_enroll_progress
+    return {"progress": get_enroll_progress()}
 
 
 @router.get("/{client_name}", response_model=ClientRead)
@@ -162,8 +169,8 @@ def create_client(payload: ClientCreate,
         "contact_number":                payload.contact_number,
         "address":                       payload.address,
         "client_status":                 False,
-        "client_current_uid_log":        0,
-        "client_current_sale_uid":       0,
+        "client_current_uid_log":        None,
+        "client_current_sale_uid":       None,
         "client_days_remaining":         plan["duration_days"],
         "client_trainer_days_remaining": plan.get(
             "trainer_duration_days", 0),
@@ -269,6 +276,18 @@ def delete_client(client_name: str,
         raise HTTPException(status_code=404, detail="Client not found")
     from app.core.fingerprint import remove_from_cache
     remove_from_cache(client_name)
+    # Delete subscription subcollection docs first (Firestore doesn't cascade)
+    batch = db.batch()
+    batch_count = 0
+    for sub_doc in client_subs(client_name).stream():
+        batch.delete(sub_doc.reference)
+        batch_count += 1
+        if batch_count >= 500:   # Firestore batch limit
+            batch.commit()
+            batch = db.batch()
+            batch_count = 0
+    if batch_count:
+        batch.commit()
     ref.delete()
 
 
@@ -336,19 +355,19 @@ def enroll_fingerprint(client_name: str,
             status_code=503,
             detail="Fingerprint scanner not available")
 
-    template = enroll_finger()
+    template = enroll_finger(skip_name=client_name)
     if not template:
         raise HTTPException(
             status_code=500,
             detail="Fingerprint enrollment failed. Please try again.")
 
+    if template.startswith("DUPLICATE:"):
+        existing = template.split(":", 1)[1]
+        raise HTTPException(
+            status_code=409,
+            detail=f"This fingerprint is already registered to '{existing}'. "
+                   f"Duplicate fingerprints are not allowed.")
+
     ref.update({"fingerprint_template": template})
     update_template_cache(client_name, template)
     return _doc_to_read(ref.get().to_dict())
-
-
-@router.get("/enroll-fingerprint/progress")
-def enroll_progress(_: TokenData = Depends(require_any)):
-    """Returns current enrollment scan count: 0=idle, 1-3=scanning, -1=failed."""
-    from app.core.fingerprint import get_enroll_progress
-    return {"progress": get_enroll_progress()}

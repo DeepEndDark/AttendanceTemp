@@ -188,7 +188,7 @@ def rent_locker(payload: LockerRentRequest,
 
 @router.post("/assign")
 def assign_locker(payload: LockerAssignRequest,
-                  _: TokenData = Depends(require_admin)):
+                  _: TokenData = Depends(require_any)):
     """
     Admin assigns a specific locker number to a client.
     Additive if client already has a locker (same locker, more days).
@@ -206,9 +206,10 @@ def assign_locker(payload: LockerAssignRequest,
                    f"(total lockers: {total})")
 
     client_ref = clients().document(payload.client_name)
-    if not client_ref.get().exists:
+    client_doc = client_ref.get()
+    if not client_doc.exists:
         raise HTTPException(status_code=404, detail="Client not found")
-    client_data = client_ref.get().to_dict()
+    client_data = client_doc.to_dict()
 
     # Check if chosen locker is already taken by someone else
     for other in (clients()

@@ -3,6 +3,7 @@ Locker management view.
 Shows a graphical grid of all lockers — green=available, blue=rented, amber=expiring.
 Admin: assign, unassign. Sales: assign only.
 """
+import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 from fapp.api_client import api, APIError
@@ -15,16 +16,20 @@ class LockerView(tk.Frame):
     def __init__(self, master, display_queue=None):
         super().__init__(master, bg="white")
         self._is_admin = False
-        self._locker_data: dict[int, dict] = {}   # locker_num -> client data
+        self._locker_data: dict[int, dict] = {}
         self._locker_buttons: dict[int, tk.Button] = {}
         self._total = 0
+        self._loading = False
         self._build()
+
+    # ---------------------------------------------------------
+    # Build
+    # ---------------------------------------------------------
 
     def _build(self):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(2, weight=1)
 
-        # Toolbar
         bar = tk.Frame(self, bg="white")
         bar.grid(row=0, column=0, sticky="ew", padx=16, pady=10)
         tk.Label(bar, text="Locker Management",
@@ -36,31 +41,27 @@ class LockerView(tk.Frame):
             command=self._unassign_locker,
             bg="#e04040", fg="white",
             relief="flat", padx=10)
-        # Shown only for admin — packed in refresh()
         tk.Button(bar, text="Assign Locker",
                   command=self._assign_locker,
                   bg="#185FA5", fg="white",
                   relief="flat", padx=10).pack(side="right", padx=4)
 
-        # Availability summary
         summary = tk.Frame(self, bg="#E6F1FB", relief="groove", bd=1)
         summary.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 8))
         self._avail_lbl = tk.Label(summary, text="", bg="#E6F1FB",
                                    font=("", 10), pady=8)
         self._avail_lbl.pack(side="left", padx=16)
 
-        # Legend
         leg = tk.Frame(summary, bg="#E6F1FB")
         leg.pack(side="right", padx=16)
         for color, label in [("#2ECC71", "Available"),
                               ("#185FA5", "Rented"),
                               ("#BA7517", "Expiring ≤3 days")]:
-            dot = tk.Frame(leg, bg=color, width=14, height=14)
-            dot.pack(side="left", padx=(8, 2))
+            tk.Frame(leg, bg=color, width=14, height=14).pack(
+                side="left", padx=(8, 2))
             tk.Label(leg, text=label, bg="#E6F1FB",
                      font=("", 9)).pack(side="left", padx=(0, 8))
 
-        # Locker grid canvas with scrollbar
         grid_container = tk.Frame(self, bg="white")
         grid_container.grid(row=2, column=0, sticky="nsew",
                             padx=16, pady=4)
@@ -91,29 +92,56 @@ class LockerView(tk.Frame):
         self.refresh()
 
     def _on_frame_configure(self, _=None):
-        self._canvas.configure(
-            scrollregion=self._canvas.bbox("all"))
+        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
 
     def _on_canvas_configure(self, event):
-        self._canvas.itemconfig(
-            self._canvas_window, width=event.width)
+        self._canvas.itemconfig(self._canvas_window, width=event.width)
+
+    # ---------------------------------------------------------
+    # Async helpers
+    # ---------------------------------------------------------
+
+    def _set_loading(self, value: bool, text: str | None = None):
+        self._loading = value
+        if text is not None:
+            self._status.config(text=text, fg="gray")
+
+    def _run_worker(self, target, name: str):
+        threading.Thread(target=target, daemon=True, name=name).start()
+
+    def _show_error(self, msg: str):
+        self._set_loading(False, msg)
+
+    # ---------------------------------------------------------
+    # Refresh
+    # ---------------------------------------------------------
 
     def refresh(self):
-        try:
-            self._is_admin = api.is_admin
-            avail = api.get_locker_availability()
-            self._total = avail["total"]
-            clients = api.list_clients()
-        except APIError as e:
-            self._status.config(text=str(e))
+        if self._loading:
             return
+        self._set_loading(True, "Loading lockers...")
+        self._run_worker(self._refresh_worker, "locker-refresh")
 
-        # Build locker->client map
-        self._locker_data = {}
-        for c in clients:
-            n = c.get("locker_number")
-            if n:
-                self._locker_data[n] = c
+    def _refresh_worker(self):
+        try:
+            avail   = api.get_locker_availability()
+            clients = api.list_clients()
+            self.after(0, lambda: self._refresh_complete(avail, clients))
+        except APIError as e:
+            msg = str(e)
+            self.after(0, lambda msg=msg: self._show_error(msg))
+        except Exception as e:
+            msg = f"Error: {e}"
+            self.after(0, lambda msg=msg: self._show_error(msg))
+
+    def _refresh_complete(self, avail: dict, clients: list):
+        self._is_admin = api.is_admin
+        self._total    = avail["total"]
+
+        self._locker_data = {
+            c["locker_number"]: c
+            for c in clients if c.get("locker_number")
+        }
 
         self._avail_lbl.config(
             text=(f"Total: {avail['total']}   |   "
@@ -121,7 +149,6 @@ class LockerView(tk.Frame):
                   f"Available: {avail['available']}   |   "
                   f"₱{avail['price']:.2f} / {avail['rental_days']} days"))
 
-        # Show/hide unassign button
         if self._is_admin:
             self._unassign_btn.pack(side="right", padx=4)
         else:
@@ -129,20 +156,17 @@ class LockerView(tk.Frame):
 
         self._selected_locker = None
         self._rebuild_grid()
-        self._status.config(
-            text=f"{avail['rented']} locker(s) rented")
+        self._set_loading(False, f"{avail['rented']} locker(s) rented")
+
+    # ---------------------------------------------------------
+    # Grid
+    # ---------------------------------------------------------
 
     def _style_locker_button(self, num: int):
-        """
-        Apply visual selected-state styling to one locker button only.
-        Does not rebuild the grid.
-        """
         btn = self._locker_buttons.get(num)
         if btn is None:
             return
-
         selected = (num == self._selected_locker)
-
         btn.config(
             relief="sunken" if selected else "raised",
             bd=3,
@@ -156,32 +180,28 @@ class LockerView(tk.Frame):
     def _rebuild_grid(self):
         for w in self._grid_frame.winfo_children():
             w.destroy()
-
         self._locker_buttons.clear()
 
         for i in range(self._total):
             num = i + 1
             row = i // COLS
             col = i % COLS
+            c   = self._locker_data.get(num)
 
-            c = self._locker_data.get(num)
             if c is None:
                 bg, fg = "#2ECC71", "white"
                 label = f"#{num}\nFree"
             else:
                 days = c["client_locker_days_remaining"]
-                if days <= 3:
-                    bg, fg = "#BA7517", "white"
-                else:
-                    bg, fg = "#185FA5", "white"
-                name = c["client_name"]
-                name_short = name[:10] + "…" if len(name) > 10 else name
+                bg   = "#BA7517" if days <= 3 else "#185FA5"
+                fg   = "white"
+                name_short = c["client_name"][:10] + "…" \
+                    if len(c["client_name"]) > 10 else c["client_name"]
                 label = f"#{num}\n{name_short}\n{days}d"
 
             btn = tk.Button(
                 self._grid_frame,
-                text=label,
-                bg=bg, fg=fg,
+                text=label, bg=bg, fg=fg,
                 width=9, height=3,
                 command=lambda n=num: self._on_locker_click(n))
             self._locker_buttons[num] = btn
@@ -191,7 +211,6 @@ class LockerView(tk.Frame):
     def _on_locker_click(self, num: int):
         previous = self._selected_locker
         self._selected_locker = num
-
         if previous is not None and previous != num:
             self._style_locker_button(previous)
         self._style_locker_button(num)
@@ -207,8 +226,13 @@ class LockerView(tk.Frame):
                 text=f"Selected: Locker #{num} — Available",
                 fg="#2ECC71")
 
+    # ---------------------------------------------------------
+    # Assign locker
+    # ---------------------------------------------------------
+
     def _assign_locker(self):
-        # Hard block if selected locker is already rented
+        if self._loading:
+            return
         if self._selected_locker and self._selected_locker in self._locker_data:
             c = self._locker_data[self._selected_locker]
             messagebox.showwarning(
@@ -218,82 +242,118 @@ class LockerView(tk.Frame):
                 "Unassign it first before reassigning.")
             return
 
+        preselect = (self._selected_locker
+                     if self._selected_locker and
+                     self._selected_locker not in self._locker_data
+                     else None)
+
+        self._set_loading(True, "Loading clients...")
+        self._run_worker(
+            lambda: self._assign_load_worker(preselect),
+            "locker-assign-load")
+
+    def _assign_load_worker(self, preselect: int | None):
         try:
-            avail = api.get_locker_availability()
-            all_clients = [c["client_name"] for c in api.list_clients()]
+            avail   = api.get_locker_availability()
+            clients = [c["client_name"] for c in api.list_clients()]
+            self.after(0, lambda: self._assign_dialog(avail, clients, preselect))
         except APIError as e:
-            messagebox.showerror("Error", str(e))
-            return
+            msg = str(e)
+            self.after(0, lambda msg=msg: self._show_error(msg))
+        except Exception as e:
+            msg = f"Error: {e}"
+            self.after(0, lambda msg=msg: self._show_error(msg))
 
-        # Pre-fill locker number if a free one is selected
-        preselect = None
-        if self._selected_locker and self._selected_locker not in self._locker_data:
-            preselect = self._selected_locker
-
+    def _assign_dialog(self, avail: dict, clients: list, preselect: int | None):
+        self._set_loading(False)
         dlg = _AssignDialog(self, total=avail["total"],
-                            all_clients=all_clients,
+                            all_clients=clients,
                             preselect_locker=preselect)
-        if dlg.result:
-            try:
-                result = api.assign_locker(
-                    dlg.result["client_name"],
-                    dlg.result["locker_number"])
-                messagebox.showinfo(
-                    "Locker Assigned",
-                    f"Locker #{result['locker_number']} assigned to "
-                    f"{result['client_name']}\n"
-                    f"Days: {result['days_added']}  |  "
-                    f"Expires: {result['expires_at']}")
-                self._refresh_tile(dlg.result["locker_number"])
-            except APIError as e:
-                messagebox.showerror("Error", str(e))
+        if not dlg.result:
+            return
+        client_name   = dlg.result["client_name"]
+        locker_number = dlg.result["locker_number"]
+        self._set_loading(True, f"Assigning locker #{locker_number}...")
+        self._run_worker(
+            lambda: self._assign_worker(client_name, locker_number),
+            "locker-assign")
 
-    def _refresh_tile(self, num: int):
-        """Refresh a single locker tile without reloading the whole grid."""
+    def _assign_worker(self, client_name: str, locker_number: int):
+        try:
+            result = api.assign_locker(client_name, locker_number)
+            self.after(0, lambda: self._assign_complete(result))
+        except APIError as e:
+            msg = str(e)
+            self.after(0, lambda msg=msg: self._show_error(msg))
+        except Exception as e:
+            msg = f"Error: {e}"
+            self.after(0, lambda msg=msg: self._show_error(msg))
+
+    def _assign_complete(self, result: dict):
+        self._set_loading(False)
+        messagebox.showinfo(
+            "Locker Assigned",
+            f"Locker #{result['locker_number']} assigned to "
+            f"{result['client_name']}\n"
+            f"Days: {result['days_added']}  |  "
+            f"Expires: {result['expires_at']}")
+        self._refresh_tile_async(result["locker_number"])
+
+    # ---------------------------------------------------------
+    # Refresh single tile
+    # ---------------------------------------------------------
+
+    def _refresh_tile_async(self, num: int):
+        self._run_worker(
+            lambda: self._tile_worker(num),
+            "locker-tile-refresh")
+
+    def _tile_worker(self, num: int):
         try:
             clients = api.list_clients()
+            avail   = api.get_locker_availability()
+            self.after(0, lambda: self._tile_complete(num, clients, avail))
         except APIError:
-            return
-        # Update local data
+            pass
+        except Exception:
+            pass
+
+    def _tile_complete(self, num: int, clients: list, avail: dict):
         self._locker_data = {
             c["locker_number"]: c
             for c in clients if c.get("locker_number")
         }
-        # Find and update just the affected button
-        row = (num - 1) // COLS
-        col = (num - 1) % COLS
         c = self._locker_data.get(num)
         if c is None:
             bg, fg, label = "#2ECC71", "white", f"#{num}\nFree"
         else:
-            days = c["client_locker_days_remaining"]
-            bg = "#BA7517" if days <= 3 else "#185FA5"
-            fg = "white"
+            days       = c["client_locker_days_remaining"]
+            bg         = "#BA7517" if days <= 3 else "#185FA5"
+            fg         = "white"
             name_short = c["client_name"][:10] + "…" \
                 if len(c["client_name"]) > 10 else c["client_name"]
             label = f"#{num}\n{name_short}\n{days}d"
+
         btn = self._locker_buttons.get(num)
-        if btn is not None:
+        if btn:
             btn.config(text=label, bg=bg, fg=fg)
             self._style_locker_button(num)
-        else:
-            # Fallback only if the button registry is unexpectedly missing.
-            for widget in self._grid_frame.grid_slaves(row=row, column=col):
-                widget.config(text=label, bg=bg, fg=fg)
-        # Update availability summary count
-        rented = len(self._locker_data)
-        avail = self._total - rented
-        try:
-            avail_data = api.get_locker_availability()
-            self._avail_lbl.config(
-                text=(f"Total: {avail_data['total']}   |   "
-                      f"Rented: {avail_data['rented']}   |   "
-                      f"Available: {avail_data['available']}   |   "
-                      f"₱{avail_data['price']:.2f} / {avail_data['rental_days']} days"))
-        except Exception:
-            pass
+
+        self._avail_lbl.config(
+            text=(f"Total: {avail['total']}   |   "
+                  f"Rented: {avail['rented']}   |   "
+                  f"Available: {avail['available']}   |   "
+                  f"₱{avail['price']:.2f} / {avail['rental_days']} days"))
+        self._status.config(
+            text=f"{avail['rented']} locker(s) rented", fg="gray")
+
+    # ---------------------------------------------------------
+    # Unassign (admin only)
+    # ---------------------------------------------------------
 
     def _unassign_locker(self):
+        if self._loading:
+            return
         if not self._selected_locker:
             messagebox.showwarning("Select", "Click a rented locker first.")
             return
@@ -308,15 +368,25 @@ class LockerView(tk.Frame):
                 "WARNING: Remaining days will be lost and no refund "
                 "will be recorded."):
             return
+        num = self._selected_locker
+        self._set_loading(True, f"Unassigning locker #{num}...")
+        self._run_worker(lambda: self._unassign_worker(num), "locker-unassign")
+
+    def _unassign_worker(self, num: int):
         try:
-            api.unassign_locker(self._selected_locker)
-            num = self._selected_locker
-            self._selected_locker = None
-            self._style_locker_button(num)
-            self._status.config(text=f"Locker #{num} unassigned.", fg="gray")
-            self._refresh_tile(num)
+            api.unassign_locker(num)
+            self.after(0, lambda: self._unassign_complete(num))
         except APIError as e:
-            messagebox.showerror("Error", str(e))
+            msg = str(e)
+            self.after(0, lambda msg=msg: self._show_error(msg))
+        except Exception as e:
+            msg = f"Error: {e}"
+            self.after(0, lambda msg=msg: self._show_error(msg))
+
+    def _unassign_complete(self, num: int):
+        self._selected_locker = None
+        self._set_loading(False, f"Locker #{num} unassigned.")
+        self._refresh_tile_async(num)
 
 
 class _AssignDialog(tk.Toplevel):

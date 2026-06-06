@@ -72,7 +72,9 @@ def rename_item(item_name: str,
                 _: TokenData = Depends(require_admin)):
     """
     Rename an item. Creates new doc, copies data, deletes old.
-    Updates open sale line items only -- closed sales preserve original names.
+    Updates open sale line items to the new name so close_sale
+    stock deduction still works correctly.
+    Closed sales preserve original names by design.
     """
     new_name = payload.new_name.strip()
     if not new_name:
@@ -95,9 +97,26 @@ def rename_item(item_name: str,
     new_ref.set(data)
     old_ref.delete()
 
-    # Note: open sale line items referencing the old name are not updated.
-    # Closed sales preserve original names by design.
-    # Open sales will show the old name until closed -- acceptable tradeoff
-    # that avoids a costly collection_group index requirement.
+    # Update open sale line items referencing the old name so that
+    # close_sale stock deduction still resolves the correct item doc.
+    open_sales = list(
+        db.collection_group("sales")
+          .where("sale_status", "==", "open")
+          .stream()
+    )
+    batch = db.batch()
+    batch_count = 0
+    for sale_doc in open_sales:
+        for item_doc in sale_doc.reference.collection("items") \
+                                          .where("item_name", "==", item_name) \
+                                          .stream():
+            batch.update(item_doc.reference, {"item_name": new_name})
+            batch_count += 1
+            if batch_count >= 500:
+                batch.commit()
+                batch = db.batch()
+                batch_count = 0
+    if batch_count:
+        batch.commit()
 
     return {"renamed": item_name, "new_name": new_name}

@@ -95,11 +95,21 @@ def rename_subscription(name: str,
     new_ref.set(data)
     old_ref.delete()
 
-    # Update all client subscription records referencing old name
+    # Update all client subscription records referencing old name using batch writes
+    from app.core.firestore_client import client_subs, clients as clients_col, db
+    batch = db.batch()
+    batch_count = 0
     for client_doc in clients_col().stream():
         cname = client_doc.id
         for sub_doc in client_subs(cname).where(
                 "subscription_name", "==", name).stream():
-            sub_doc.reference.update({"subscription_name": new_name})
+            batch.update(sub_doc.reference, {"subscription_name": new_name})
+            batch_count += 1
+            if batch_count >= 500:
+                batch.commit()
+                batch = db.batch()
+                batch_count = 0
+    if batch_count:
+        batch.commit()
 
     return _to_read(data)

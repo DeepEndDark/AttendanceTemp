@@ -30,20 +30,36 @@ def _fetch_all_logs(
     collection_group("logs") queries ALL logs subcollections at once,
     bypassing the phantom-document problem where date parent docs are
     invisible to .stream().
+
+    Firestore-level date filters are applied where possible to reduce
+    documents streamed. Client-side filters remain as a safety net for
+    legacy docs where log_date may need path-derivation.
     """
     query = db.collection_group("logs")
     if client_name:
         query = query.where("client_name", "==", client_name)
 
+    # Push date filters to Firestore to avoid full collection scan
+    if date_exact:
+        query = query.where("log_date", "==", date_exact)
+    elif date_from and date_to:
+        query = query.where("log_date", ">=", date_from) \
+                     .where("log_date", "<=", date_to)
+    elif date_from:
+        query = query.where("log_date", ">=", date_from)
+    elif date_to:
+        query = query.where("log_date", "<=", date_to)
+
     results = []
     for doc in query.stream():
         d = doc.to_dict()
-        # Derive log_date from path: attendance_logs/{date}/logs/{uid}
+        # Derive log_date from path as fallback: attendance_logs/{date}/logs/{uid}
         parts = doc.reference.path.split("/")
         d["log_date"] = parts[1] if (
             len(parts) >= 4 and parts[0] == "attendance_logs"
         ) else d.get("log_date", "")
 
+        # Client-side safety filters for legacy docs
         ld = d["log_date"]
         if date_exact and ld != date_exact:
             continue
@@ -160,7 +176,10 @@ def time_out(payload: TimeOutRequest, _: TokenData = Depends(require_any)):
     now_str  = datetime.now().strftime("%H:%M:%S")
 
     log_ref.update({"time_out": now_str})
-    ref.update({"client_status": False})
+    ref.update({
+        "client_status":          False,
+        "client_current_uid_log": None,
+    })
 
     parts = log_ref.path.split("/")
     log_data["log_date"] = parts[1] if len(parts) >= 4 else ""
@@ -169,6 +188,38 @@ def time_out(payload: TimeOutRequest, _: TokenData = Depends(require_any)):
 
 
 # ── Fingerprint continuous scan ───────────────────────────────
+
+@router.delete("/{log_uid}", response_model=dict)
+def delete_attendance_log(log_uid: int, _: TokenData = Depends(require_admin)):
+    """
+    Admin only. Permanently deletes an attendance log by UID.
+    If the client is currently timed-in on this log, their status is reset to timed-out.
+    """
+    results = list(
+        db.collection_group("logs").where("log_uid", "==", log_uid).stream()
+    )
+    if not results:
+        raise HTTPException(status_code=404, detail="Attendance log not found")
+
+    log_ref  = results[0].reference
+    log_data = results[0].to_dict()
+    client_name = log_data.get("client_name")
+
+    # If client is currently timed-in on this exact log, reset their status
+    if client_name:
+        client_ref  = clients().document(client_name)
+        client_doc  = client_ref.get()
+        if client_doc.exists:
+            cd = client_doc.to_dict()
+            if cd.get("client_current_uid_log") == log_uid and cd.get("client_status"):
+                client_ref.update({
+                    "client_status": False,
+                    "client_current_uid_log": None,
+                })
+
+    log_ref.delete()
+    return {"deleted": True, "log_uid": log_uid}
+
 
 @router.post("/finger-touch")
 def finger_touch(_: TokenData = Depends(require_any)):
@@ -265,6 +316,9 @@ def fingerprint_scan(_: TokenData = Depends(require_any)):
             db.collection_group("logs").where("log_uid", "==", uid).stream())
         if results:
             results[0].reference.update({"time_out": now_str})
-        ref.update({"client_status": False})
+        ref.update({
+            "client_status":          False,
+            "client_current_uid_log": None,
+        })
         return {"type": "time_out", "title": client_name,
                 "subtitle": f"Timed out at {now_str}"}

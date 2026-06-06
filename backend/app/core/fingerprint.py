@@ -51,21 +51,34 @@ class _FingerprintService:
     """
     Mirrors testpy2.py IdentifyForm pattern exactly.
     Scanner is always armed. External threads only read queues.
+
+    Thread safety:
+    - All SDK calls happen on the WinForms thread (_run / _do_reopen).
+    - Background threads NEVER call reader methods directly.
+    - _failure_flag is set by _on_captured (SDK callback thread) to
+      signal the WinForms thread to reopen the reader.
     """
 
     def __init__(self, dp_module):
-        self._dp          = dp_module
-        self._reader      = None
-        self._ready       = threading.Event()
-        self._fid_queue   = queue.Queue()
-        self._touch_queue = queue.Queue()
+        self._dp            = dp_module
+        self._reader        = None
+        self._form          = None          # WinForms Form — for BeginInvoke
+        self._ready         = threading.Event()
+        self._fid_queue     = queue.Queue()
+        self._touch_queue   = queue.Queue()
         self._capture_count = 0
-        self._enrolling   = threading.Event()  # set during enrollment; scanner loop backs off
+        self._enrolling     = threading.Event()
+        self._failure_flag  = threading.Event()  # set by SDK callback on failure
+        self._stop_flag     = threading.Event()  # set to request WinForms exit
 
         t = threading.Thread(target=self._run, daemon=True, name="FPWinForms")
         t.start()
         if not self._ready.wait(timeout=15):
             log.warning("FP: reader did not open within 15s")
+
+    # ---------------------------------------------------------
+    # WinForms thread — owns the entire reader lifecycle
+    # ---------------------------------------------------------
 
     def _run(self):
         log.warning("FP[thread]: _run started")
@@ -74,7 +87,7 @@ class _FingerprintService:
             clr.AddReference("System.Windows.Forms")
             from System.Windows.Forms import Application, Form
 
-            dp   = self._dp
+            dp = self._dp
             clr.AddReference("System.Drawing")
             from System.Drawing import Point, Size
             from System.Windows.Forms import FormBorderStyle as FBS, FormWindowState
@@ -87,10 +100,13 @@ class _FingerprintService:
             form.Size            = Size(1, 1)
             form.Location        = Point(-32000, -32000)
 
+            from System import EventHandler
             def _on_shown(sender, args):
                 form.Hide()
-            from System import EventHandler
             form.Shown += EventHandler(_on_shown)
+
+            # Store form so other methods can BeginInvoke onto this thread
+            self._form = form
 
             log.warning("FP[thread]: getting readers...")
             readers = dp.ReaderCollection.GetReaders()
@@ -112,11 +128,7 @@ class _FingerprintService:
                 self._ready.set()
                 return
 
-            self._reader = reader
-
-            status = reader.GetStatus()
-            log.warning(f"FP[thread]: reader status = {reader.Status.Status}")
-
+            self._reader   = reader
             self._callback = dp.Reader.CaptureCallback(self._on_captured)
             reader.On_Captured += self._callback
             log.warning("FP[thread]: callback registered")
@@ -125,25 +137,43 @@ class _FingerprintService:
             try:
                 clr.AddReference("Microsoft.Win32.SystemEvents")
                 from Microsoft.Win32 import SystemEvents, PowerModeChangedEventArgs
-                from Microsoft.Win32 import PowerModes
                 svc = self
 
                 def _on_power_mode(sender, args):
                     mode = str(args.Mode)
                     log.warning(f"FP[thread]: power mode change: {mode}")
                     if "Resume" in mode or "StatusChange" in mode:
-                        log.warning("FP[thread]: wake detected -- reopening reader")
-                        svc._reopen_reader()
+                        log.warning("FP[thread]: wake detected -- scheduling reopen")
+                        # Already on WinForms thread via SystemEvents
+                        svc._do_reopen()
 
                 from System import EventHandler
-                _power_handler = EventHandler[PowerModeChangedEventArgs](_on_power_mode)
+                from Microsoft.Win32 import PowerModeChangedEventArgs
+                _power_handler = EventHandler[PowerModeChangedEventArgs](
+                    _on_power_mode)
                 SystemEvents.PowerModeChanged += _power_handler
                 log.warning("FP[thread]: power event handler registered")
             except Exception:
-                log.warning("FP[thread]: sleep/wake recovery not available on this runtime")
+                log.warning("FP[thread]: sleep/wake recovery not available")
+
+            # Poll failure_flag and stop_flag from the message pump
+            from System.Windows.Forms import Timer as WinTimer
+            from System import EventHandler as EH
+
+            def _on_timer_tick(sender, args):
+                if self._stop_flag.is_set():
+                    Application.ExitThread()
+                    return
+                if self._failure_flag.is_set():
+                    self._failure_flag.clear()
+                    self._do_reopen()
+
+            timer = WinTimer()
+            timer.Interval = 500   # check every 500ms
+            timer.Tick += EH(_on_timer_tick)
+            timer.Start()
 
             self._arm_capture()
-
             self._ready.set()
             log.warning("FP[thread]: ready -- calling Application.Run")
             Application.Run(form)
@@ -153,18 +183,41 @@ class _FingerprintService:
             log.error(f"FP[thread]: exception: {e}")
             self._ready.set()
 
-    def _reopen_reader(self):
-        import time
+    def stop(self):
+        """Signal the WinForms thread to exit cleanly."""
+        self._stop_flag.set()
+
+    # ---------------------------------------------------------
+    # Reader reopen — MUST only run on WinForms thread
+    # ---------------------------------------------------------
+
+    def _do_reopen(self):
+        """
+        Close and reopen the reader.
+        Called only from the WinForms thread (via timer tick or power event).
+        """
+        global SCANNER_AVAILABLE
         dp = self._dp
-        log.warning("FP[reopen]: closing reader...")
+        import time
+
+        log.warning("FP[reopen]: closing reader on WinForms thread...")
         try:
             if self._reader:
                 self._reader.CancelCapture()
-                self._reader.On_Captured -= self._callback
+                try:
+                    self._reader.On_Captured -= self._callback
+                except Exception:
+                    pass
                 self._reader.Dispose()
                 self._reader = None
         except Exception as e:
             log.warning(f"FP[reopen]: close error (expected): {e}")
+
+        SCANNER_AVAILABLE = False
+        for q in (self._touch_queue, self._fid_queue):
+            while not q.empty():
+                try: q.get_nowait()
+                except Exception: break
 
         time.sleep(2.0)
 
@@ -186,21 +239,22 @@ class _FingerprintService:
                     time.sleep(2.0)
                     continue
 
-                self._reader = reader
+                self._reader   = reader
                 self._callback = dp.Reader.CaptureCallback(self._on_captured)
                 reader.On_Captured += self._callback
-                for q in (self._touch_queue, self._fid_queue):
-                    while not q.empty():
-                        try: q.get_nowait()
-                        except Exception: break
                 self._arm_capture()
-                log.warning("FP[reopen]: reader reopened and armed successfully")
+                SCANNER_AVAILABLE = True
+                log.warning("FP[reopen]: reader reopened successfully")
                 return
             except Exception as e:
                 log.error(f"FP[reopen]: attempt {attempt+1} error: {e}")
                 time.sleep(2.0)
 
         log.error("FP[reopen]: all reopen attempts failed -- scanner unavailable")
+
+    # ---------------------------------------------------------
+    # Arm capture
+    # ---------------------------------------------------------
 
     def _arm_capture(self):
         dp = self._dp
@@ -222,21 +276,29 @@ class _FingerprintService:
                 return
         log.warning("FP: _arm_capture gave up after 10 attempts")
 
+    # ---------------------------------------------------------
+    # SDK callback — fires on SDK thread, never touches reader directly
+    # ---------------------------------------------------------
+
     def _on_captured(self, capture_result):
         dp = self._dp
         self._capture_count += 1
         n = self._capture_count
-        log.warning(f"FP[thread]: _on_captured #{n} fired, ResultCode={capture_result.ResultCode}")
+        log.warning(
+            f"FP[thread]: _on_captured #{n} fired, "
+            f"ResultCode={capture_result.ResultCode}")
         try:
             if capture_result.ResultCode != dp.Constants.ResultCode.DP_SUCCESS:
-                log.warning("FP[thread]: capture result not success -- skipping touch signal")
+                log.warning(
+                    "FP[thread]: capture not success -- "
+                    f"code={capture_result.ResultCode}")
                 self._fid_queue.put(None)
-                # Device failure = reader unplugged -- trigger hotplug recovery immediately
                 if "FAILURE" in str(capture_result.ResultCode):
-                    log.warning("FP[thread]: DP_DEVICE_FAILURE detected -- signalling hotplug")
-                    import threading as _t
-                    _t.Thread(target=self._handle_device_failure,
-                              daemon=True).start()
+                    log.warning(
+                        "FP[thread]: DP_DEVICE_FAILURE -- "
+                        "scheduling reopen via WinForms timer")
+                    # Set flag only — WinForms timer will pick it up safely
+                    self._failure_flag.set()
                 return
 
             if capture_result.Data is None:
@@ -244,31 +306,17 @@ class _FingerprintService:
                 self._fid_queue.put(None)
                 return
 
-            # Only signal touch on successful captures
             self._touch_queue.put(True)
-            log.warning("FP[thread]: touch signal queued")
-            log.warning("FP[thread]: FID captured OK, queuing")
+            log.warning("FP[thread]: touch signal + FID queued")
             self._fid_queue.put(capture_result.Data)
 
         except Exception as e:
             log.error(f"FP[thread]: _on_captured error: {e}")
             self._fid_queue.put(None)
 
-    def _handle_device_failure(self):
-        """Called from _on_captured on DP_DEVICE_FAILURE (unplug). Sets SCANNER_AVAILABLE=False so hotplug watcher re-enters polling."""
-        global SCANNER_AVAILABLE
-        import time
-        time.sleep(0.5)  # brief wait for SDK to settle
-        log.warning("FP[thread]: marking scanner unavailable after device failure")
-        try:
-            if self._reader:
-                self._reader.CancelCapture()
-                self._reader.Dispose()
-                self._reader = None
-        except Exception as e:
-            log.warning(f"FP[thread]: cleanup after failure: {e}")
-        SCANNER_AVAILABLE = False
-        log.warning("FP[thread]: hotplug watcher will now detect and recover")
+    # ---------------------------------------------------------
+    # Public methods — called from external threads (safe: queue only)
+    # ---------------------------------------------------------
 
     def wait_for_touch(self, timeout: float = 30.0) -> bool:
         log.warning(f"FP: wait_for_touch called, reader={self._reader is not None}")
@@ -330,7 +378,6 @@ class _FingerprintService:
     def available(self) -> bool:
         return self._reader is not None
 
-
 # ── Module init ───────────────────────────────────────────────
 
 def _init():
@@ -360,6 +407,18 @@ def _init():
         log.warning(f"FP: failed to load DPUruNet: {e}")
         return
 
+    # Stop old service cleanly before creating a new one.
+    # This signals Application.ExitThread() via the WinForms timer so
+    # the old message pump exits before the new service opens the reader.
+    if _service is not None:
+        log.warning("FP: stopping old service before reinit")
+        try:
+            _service.stop()
+            import time
+            time.sleep(1.5)   # give WinForms thread time to exit
+        except Exception as e:
+            log.warning(f"FP: old service stop error: {e}")
+
     _service = _FingerprintService(_dp)
 
     if _service.available:
@@ -376,10 +435,9 @@ _init()
 def _hotplug_watcher():
     """
     Permanent background thread monitoring reader presence.
-    - If reader absent on startup: polls every 5s until it appears.
-    - If reader unplugged at runtime: detects via health check,
-      marks scanner unavailable, waits for re-plug, re-initializes.
-    Runs forever as a daemon thread.
+    - Phase 1: polls every 5s when scanner unavailable.
+    - Phase 2: monitors _failure_flag (set by SDK callback) when available.
+      Never calls SDK methods directly — all SDK calls stay on WinForms thread.
     """
     global SCANNER_AVAILABLE
     import time
@@ -388,7 +446,7 @@ def _hotplug_watcher():
     while True:
         # ── Phase 1: wait for reader to become available ──────
         if not SCANNER_AVAILABLE:
-            log.warning("FP[hotplug]: scanner unavailable -- polling for reader every 5s")
+            log.warning("FP[hotplug]: scanner unavailable -- polling every 5s")
             while not SCANNER_AVAILABLE:
                 time.sleep(5)
                 try:
@@ -407,32 +465,18 @@ def _hotplug_watcher():
                     log.warning(f"FP[hotplug]: poll error: {e}")
             log.warning("FP[hotplug]: scanner online")
 
-        # ── Phase 2: monitor for unplug while available ───────
+        # ── Phase 2: monitor via failure_flag — no SDK calls ──
+        # The _failure_flag is set by _on_captured on DP_DEVICE_FAILURE.
+        # The WinForms timer picks it up and calls _do_reopen on the
+        # correct thread. We just watch SCANNER_AVAILABLE here.
         time.sleep(5)
         if not SCANNER_AVAILABLE:
-            continue   # already gone, loop back to phase 1
+            continue   # already gone (WinForms reopen failed), phase 1
 
-        try:
-            if _service and _service._reader:
-                _service._reader.GetStatus()
-                state = str(_service._reader.Status.Status)
-                # Unexpected states indicate reader was unplugged or reset
-                if "FAILURE" in state or "DISCONNECT" in state or "UNAVAIL" in state:
-                    raise RuntimeError(f"Reader state: {state}")
-            elif _service and not _service.available:
-                raise RuntimeError("Reader handle lost")
-        except Exception as e:
-            log.warning(f"FP[hotplug]: reader lost ({e}) -- marking unavailable")
+        if _service and not _service.available:
+            log.warning("FP[hotplug]: reader handle lost -- marking unavailable")
             SCANNER_AVAILABLE = False
-            # Clean up stale service
-            try:
-                if _service and _service._reader:
-                    _service._reader.CancelCapture()
-                    _service._reader.Dispose()
-                    _service._reader = None
-            except Exception:
-                pass
-            # Loop back to phase 1 to wait for re-plug
+            # loop back to phase 1
 
 
 import threading as _ht
@@ -583,7 +627,7 @@ def identify_from_cache(rearm: bool = False) -> Optional[str]:
     return best_name
 
 
-def enroll_finger() -> Optional[str]:
+def enroll_finger(skip_name: str | None = None) -> Optional[str]:
     if not SCANNER_AVAILABLE:
         return None
 
@@ -637,12 +681,36 @@ def enroll_finger() -> Optional[str]:
         enroll   = dp.Enrollment.CreateEnrollmentFmd(
             dp.Constants.Formats.Fmd.ANSI, fmd_list)
         if enroll.ResultCode == dp.Constants.ResultCode.DP_SUCCESS:
-            return base64.b64encode(bytes(enroll.Data.Bytes)).decode()
-        log.warning(f"FP: enrollment FMD failed ({enroll.ResultCode}), using first capture")
-        return base64.b64encode(fmds[0]).decode()
+            enrolled_bytes = bytes(enroll.Data.Bytes)
+        else:
+            log.warning(f"FP: enrollment FMD failed ({enroll.ResultCode}), using first capture")
+            enrolled_bytes = fmds[0]
     except Exception as e:
         log.warning(f"FP: enrollment error: {e}, using first capture")
-        return base64.b64encode(fmds[0]).decode()
+        enrolled_bytes = fmds[0]
+
+    # ── Duplicate check — compare against all cached templates ──
+    enrolled_fmd = _bytes_to_fmd(enrolled_bytes)
+    if enrolled_fmd is not None and _cache:
+        for existing_name, stored_bytes in _cache.items():
+            if skip_name and existing_name == skip_name:
+                continue   # skip self — re-scan of own finger is allowed
+            try:
+                stored_fmd = _bytes_to_fmd(stored_bytes)
+                if stored_fmd is None:
+                    continue
+                cmp = dp.Comparison.Compare(enrolled_fmd, 0, stored_fmd, 0)
+                if (cmp.ResultCode == dp.Constants.ResultCode.DP_SUCCESS
+                        and cmp.Score < MATCH_THRESHOLD):
+                    log.warning(
+                        f"FP: enroll duplicate detected -- "
+                        f"matches existing client '{existing_name}' "
+                        f"(score={cmp.Score})")
+                    return f"DUPLICATE:{existing_name}"
+            except Exception as e:
+                log.warning(f"FP: duplicate check error for {existing_name}: {e}")
+
+    return base64.b64encode(enrolled_bytes).decode()
 
 
 def verify(client_name: str) -> bool:

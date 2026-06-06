@@ -1,8 +1,10 @@
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
+from datetime import date
 
 from fapp.api_client import api, APIError
+from fapp.views.admin_attendance_view import _CalPicker, _make_date_entry
 
 
 class AdminSalesView(tk.Frame):
@@ -97,44 +99,16 @@ class AdminSalesView(tk.Frame):
             width=14
         ).pack(side="left", padx=4)
 
-        tk.Label(
-            flt,
-            text="Date:",
-            bg="white"
-        ).pack(side="left", padx=(6, 2))
-
         self._date_exact = tk.StringVar()
-        tk.Entry(
-            flt,
-            textvariable=self._date_exact,
-            width=11
-        ).pack(side="left")
+        self._date_from  = tk.StringVar()
+        self._date_to    = tk.StringVar()
 
-        tk.Label(
-            flt,
-            text="From:",
-            bg="white"
-        ).pack(side="left", padx=(4, 2))
-
-        self._date_from = tk.StringVar()
-        tk.Entry(
-            flt,
-            textvariable=self._date_from,
-            width=11
-        ).pack(side="left")
-
-        tk.Label(
-            flt,
-            text="To:",
-            bg="white"
-        ).pack(side="left", padx=(4, 2))
-
-        self._date_to = tk.StringVar()
-        tk.Entry(
-            flt,
-            textvariable=self._date_to,
-            width=11
-        ).pack(side="left")
+        _make_date_entry(flt, self._date_exact, "Date:").pack(
+            side="left", padx=(6, 2))
+        _make_date_entry(flt, self._date_from, "From:").pack(
+            side="left", padx=(4, 2))
+        _make_date_entry(flt, self._date_to, "To:").pack(
+            side="left", padx=(4, 2))
 
         self._status_var = tk.StringVar(value="all")
 
@@ -187,24 +161,34 @@ class AdminSalesView(tk.Frame):
         left.rowconfigure(0, weight=1)
         left.columnconfigure(0, weight=1)
 
-        cols = ("uid", "date", "client", "status", "total")
+        cols = ("chk", "uid", "date", "client", "status", "total")
 
         self._tree = ttk.Treeview(
             left,
             columns=cols,
             show="headings",
-            selectmode="browse"
+            selectmode="extended"
         )
 
         for col, txt, w in [
-            ("uid", "UID", 60),
-            ("date", "Date", 90),
-            ("client", "Client", 140),
-            ("status", "Status", 70),
-            ("total", "Total ₱", 80),
+            ("chk",    "☐",        28),
+            ("uid",    "UID",       60),
+            ("date",   "Date",      90),
+            ("client", "Client",   140),
+            ("status", "Status",    70),
+            ("total",  "Total ₱",   80),
         ]:
-            self._tree.heading(col, text=txt)
+            self._tree.heading(col, text=txt,
+                               command=lambda c=col: self._sort(c))
             self._tree.column(col, width=w, anchor="center")
+        self._tree.column("uid", width=0, minwidth=0, stretch=False)
+        self._tree.heading("uid", text="")
+        self._tree.column("chk", width=28, minwidth=28, stretch=False)
+        self._tree.heading("chk", text="☐", command=self._toggle_all)
+
+        self._checked: set[str] = set()
+        self._sort_col: str | None = None
+        self._sort_asc: bool = True
 
         sb = ttk.Scrollbar(
             left,
@@ -220,6 +204,7 @@ class AdminSalesView(tk.Frame):
         self._tree.tag_configure("open", foreground="#185FA5")
         self._tree.tag_configure("date_group", background="#F1EFE8")
         self._tree.bind("<<TreeviewSelect>>", self._on_select)
+        self._tree.bind("<ButtonRelease-1>", self._on_click)
 
         right = tk.LabelFrame(split, text="Items", bg="white")
         right.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
@@ -370,10 +355,15 @@ class AdminSalesView(tk.Frame):
 
         self._client_var.set("")
         self._item_var.set("")
-        self._date_exact.set("")
+        self._date_exact.set(date.today().isoformat())
         self._date_from.set("")
         self._date_to.set("")
         self._status_var.set("all")
+        self._sort_col = None
+        self._sort_asc = True
+        for c, lbl in {"date": "Date", "client": "Client",
+                       "status": "Status", "total": "Total ₱"}.items():
+            self._tree.heading(c, text=lbl)
 
         self._item_tree.delete(*self._item_tree.get_children())
         self._total_lbl.config(text="Total: ₱0.00")
@@ -388,7 +378,7 @@ class AdminSalesView(tk.Frame):
     def _refresh_worker(self):
         try:
             items = api.list_items()
-            sales = api.list_all_sales()
+            sales = api.list_all_sales(date_exact=date.today().isoformat())
 
             self.after(
                 0,
@@ -504,13 +494,32 @@ class AdminSalesView(tk.Frame):
         self._apply_filter()
         self._set_loading(False)
 
+    def _sort(self, col: str):
+        if col in ("chk", "uid"):
+            return
+        if self._sort_col == col:
+            self._sort_asc = not self._sort_asc
+        else:
+            self._sort_col = col
+            self._sort_asc = True
+
+        # Update heading indicators
+        labels = {"date": "Date", "client": "Client",
+                  "status": "Status", "total": "Total ₱"}
+        for c, lbl in labels.items():
+            arrow = (" ▲" if self._sort_asc else " ▼") if c == col else ""
+            self._tree.heading(c, text=lbl + arrow)
+
+        self._apply_filter()
+
     def _apply_filter(self):
         self._tree.delete(*self._tree.get_children())
+        self._checked.clear()
+        self._tree.heading("chk", text="☐")
 
         visible_sales = self._all_sales
 
         status_filter = self._status_var.get()
-
         if status_filter != "all":
             visible_sales = [
                 s for s in visible_sales
@@ -518,50 +527,138 @@ class AdminSalesView(tk.Frame):
             ]
 
         by_date: dict[str, list] = {}
-
         for s in visible_sales:
-            by_date.setdefault(
-                s.get("sale_date", ""),
-                []
-            ).append(s)
+            by_date.setdefault(s.get("sale_date", ""), []).append(s)
 
         for d in sorted(by_date.keys(), reverse=True):
             diid = f"d_{d}"
+            self._tree.insert("", "end", iid=diid,
+                              values=("☐", "", d, "", "", ""),
+                              tags=("date_group",))
 
-            self._tree.insert(
-                "",
-                "end",
-                iid=diid,
-                values=("", d, "", "", ""),
-                tags=("date_group",)
-            )
+            group = by_date[d]
 
-            for s in sorted(
-                by_date[d],
-                key=lambda x: x.get("client_name", "")
-            ):
+            field_map = {"date": "sale_date", "client": "client_name",
+                         "status": "sale_status", "total": "total_price"}
+            if self._sort_col and self._sort_col in field_map:
+                field = field_map[self._sort_col]
+                group = sorted(group,
+                               key=lambda s: s.get(field, "") or "",
+                               reverse=not self._sort_asc)
+            else:
+                # Default: open first by uid desc, then closed by uid desc
+                open_s   = sorted([s for s in group if s.get("sale_status") == "open"],
+                                  key=lambda s: s.get("sales_uid", 0), reverse=True)
+                closed_s = sorted([s for s in group if s.get("sale_status") != "open"],
+                                  key=lambda s: s.get("sales_uid", 0), reverse=True)
+                group = open_s + closed_s
+
+            for s in group:
                 uid = str(s["sales_uid"])
                 tag = "open" if s.get("sale_status") == "open" else ""
-
                 self._tree.insert(
-                    diid,
-                    "end",
-                    iid=uid,
+                    diid, "end", iid=uid,
                     values=(
+                        "☐",
                         s.get("sales_uid"),
                         s.get("sale_date", ""),
                         s.get("client_name", ""),
                         str(s.get("sale_status", "")).capitalize(),
                         f"{s.get('total_price', 0):.2f}",
                     ),
-                    tags=(tag,)
+                    tags=(tag,),
                 )
 
             self._tree.item(diid, open=True)
 
-        self._status_lbl.config(
-            text=f"{len(visible_sales)} sale(s)"
-        )
+        self._status_lbl.config(text=f"{len(visible_sales)} sale(s)")
+
+    # ---------------------------------------------------------
+    # Checkbox logic
+    # ---------------------------------------------------------
+
+    def _on_click(self, event):
+        region = self._tree.identify_region(event.x, event.y)
+        col    = self._tree.identify_column(event.x)
+        iid    = self._tree.identify_row(event.y)
+        if not iid or region != "cell":
+            return
+        if col == "#1":
+            if iid.startswith("d_"):
+                self._toggle_date_group(iid)
+            else:
+                self._toggle_row(iid)
+
+    def _toggle_row(self, iid: str):
+        if iid in self._checked:
+            self._checked.discard(iid)
+            self._tree.set(iid, "chk", "☐")
+        else:
+            self._checked.add(iid)
+            self._tree.set(iid, "chk", "☑")
+        self._sync_header()
+
+    def _toggle_date_group(self, diid: str):
+        children = self._tree.get_children(diid)
+        all_checked = all(c in self._checked for c in children)
+        if all_checked:
+            for c in children:
+                self._checked.discard(c)
+                self._tree.set(c, "chk", "☐")
+            self._tree.set(diid, "chk", "☐")
+        else:
+            for c in children:
+                self._checked.add(c)
+                self._tree.set(c, "chk", "☑")
+            self._tree.set(diid, "chk", "☑")
+        self._sync_header()
+
+    def _toggle_all(self):
+        all_rows = [
+            c for iid in self._tree.get_children("")
+            for c in self._tree.get_children(iid)
+        ]
+        if all_rows and all(r in self._checked for r in all_rows):
+            self._checked.clear()
+            for iid in self._tree.get_children(""):
+                self._tree.set(iid, "chk", "☐")
+                for c in self._tree.get_children(iid):
+                    self._tree.set(c, "chk", "☐")
+            self._tree.heading("chk", text="☐")
+        else:
+            for iid in self._tree.get_children(""):
+                self._tree.set(iid, "chk", "☑")
+                for c in self._tree.get_children(iid):
+                    self._checked.add(c)
+                    self._tree.set(c, "chk", "☑")
+            self._tree.heading("chk", text="☑")
+
+    def _sync_header(self):
+        all_rows = [
+            c for iid in self._tree.get_children("")
+            for c in self._tree.get_children(iid)
+        ]
+        if not all_rows:
+            return
+        if all(r in self._checked for r in all_rows):
+            self._tree.heading("chk", text="☑")
+        elif any(r in self._checked for r in all_rows):
+            self._tree.heading("chk", text="—")
+        else:
+            self._tree.heading("chk", text="☐")
+
+    def _selected_uids(self) -> list[int]:
+        source = self._checked or {
+            iid for iid in self._tree.selection()
+            if not iid.startswith("d_")
+        }
+        uids = []
+        for iid in source:
+            try:
+                uids.append(int(iid))
+            except ValueError:
+                pass
+        return uids
 
     # ---------------------------------------------------------
     # Selection
@@ -573,8 +670,9 @@ class AdminSalesView(tk.Frame):
         if not sel:
             return
 
+        # With multiselect, load detail for the most recently focused item
         try:
-            uid = int(sel[0])
+            uid = int(sel[-1])
         except ValueError:
             return
 
@@ -974,69 +1072,46 @@ class AdminSalesView(tk.Frame):
             return
 
         if not api.is_admin:
-            messagebox.showerror(
-                "Admin Only",
-                "Only admins can delete sales logs."
-            )
+            messagebox.showerror("Admin Only", "Only admins can delete sales logs.")
             return
 
-        if self._selected_uid is None:
-            messagebox.showwarning(
-                "Select",
-                "Select a sale log first."
-            )
+        uids = self._selected_uids()
+        if not uids:
+            messagebox.showwarning("Select", "Select one or more sales to delete.")
             return
 
-        uid = self._selected_uid
-        sale = self._sale_map.get(uid)
-        client_name = sale.get("client_name", "") if sale else ""
-
+        noun = f"{len(uids)} sale(s)" if len(uids) > 1 else f"sale #{uids[0]}"
         if not messagebox.askyesno(
             "Confirm Delete",
-            (
-                f"Delete sale #{uid}"
-                f"{f' for {client_name}' if client_name else ''}?\n\n"
-                "This permanently removes the sale log.\n"
-                "If the sale is open, reserved stock will be released."
-            )
+            f"Delete {noun}?\n\n"
+            "This permanently removes the sale log(s).\n"
+            "Reserved stock for open sales will be released.",
         ):
             return
 
-        self._set_loading(True, "Deleting sale...")
-
+        self._set_loading(True, f"Deleting {len(uids)} sale(s)...")
         self._run_worker(
-            lambda: self._delete_sale_worker(uid),
-            "sales-delete-sale"
+            lambda: self._delete_sale_worker_multi(uids),
+            "sales-delete-multi",
         )
 
-    def _delete_sale_worker(self, uid: int):
-        try:
-            api.delete_sale(uid)
+    def _delete_sale_worker_multi(self, uids: list[int]):
+        errors = []
+        for uid in uids:
+            try:
+                api.delete_sale(uid)
+            except Exception as e:
+                errors.append(f"#{uid}: {e}")
+        msg = f"Deleted {len(uids) - len(errors)} sale(s)."
+        if errors:
+            msg += "  Errors: " + "; ".join(errors)
+        self.after(0, lambda: self._after_delete_multi(msg))
 
-            self.after(
-                0,
-                lambda: self._after_delete_sale(uid)
-            )
-
-        except APIError as e:
-            msg = str(e)
-            self.after(
-                0,
-                lambda msg=msg: self._show_error(msg)
-            )
-
-        except Exception as e:
-            msg = f"Error: {e}"
-            self.after(
-                0,
-                lambda msg=msg: self._show_error(msg)
-            )
-
-    def _after_delete_sale(self, uid: int):
+    def _after_delete_multi(self, msg: str):
         self._selected_uid = None
         self._item_tree.delete(*self._item_tree.get_children())
         self._total_lbl.config(text="Total: ₱0.00")
-        self._status_lbl.config(text=f"Sale #{uid} deleted.")
+        self._status_lbl.config(text=msg)
         self._set_loading(False)
         self._refresh_preserve(None)
 
@@ -1058,7 +1133,12 @@ class AdminSalesView(tk.Frame):
     def _refresh_preserve_worker(self, uid: int | None):
         try:
             items = api.list_items()
-            sales = api.list_all_sales()
+            exact = self._date_exact.get().strip() or None
+            dfrom = self._date_from.get().strip() or None
+            dto   = self._date_to.get().strip() or None
+            sales = api.list_all_sales(date_exact=exact,
+                                       date_from=dfrom,
+                                       date_to=dto)
 
             self.after(
                 0,

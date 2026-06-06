@@ -379,6 +379,9 @@ class APIClient:
         self._refresh_bg("clients")
         return r
 
+    def delete_attendance(self, log_uid: int):
+        return self._delete(f"/attendance/{log_uid}")
+
     def finger_touch(self):
         """
         Blocks up to ~32 s waiting for a finger to be physically placed.
