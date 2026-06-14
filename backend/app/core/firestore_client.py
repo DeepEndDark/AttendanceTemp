@@ -90,14 +90,6 @@ def items():
     return col("item_catalogue")
 
 
-def daily_reports():
-    return col("daily_reports")
-
-
-def monthly_reports():
-    return col("monthly_reports")
-
-
 def system_state():
     return col("system_state")
 

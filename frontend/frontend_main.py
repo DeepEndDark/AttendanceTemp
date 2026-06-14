@@ -32,12 +32,10 @@ class App(tk.Tk):
         self._display_queue: queue.Queue = queue.Queue()
         self._att_queue:     queue.Queue = queue.Queue()
         try:
-            icon_path = resource_path("assets/app_icon.ico")
+            icon_path = resource_path("assets/tgym.ico")
             icon_path = os.path.normpath(icon_path)
-
             if os.path.exists(icon_path):
                 self.iconbitmap(default=icon_path)
-
         except Exception as e:
             print(f"Window icon load failed: {e}")
 
@@ -63,7 +61,7 @@ class App(tk.Tk):
     def _show_main(self):
         self._clear()
         self._view_cache.clear()
-        self.title(f"Attendance & Sales — {api.account_name}")
+        self.title(f"Tiger Fitness Gym — {api.account_name}")
 
         # Launch client display window
         self._client_win = ClientDisplayWindow(self, self._display_queue)
@@ -72,26 +70,32 @@ class App(tk.Tk):
         self._scanner_stop.clear()
         threading.Thread(target=self._scanner_loop, daemon=True).start()
 
+        # Redirect to login on any 401 — token expired or invalidated
+        from fapp.api_client import APIClient
+        APIClient.set_unauthorized_handler(
+            lambda: self.after(0, self._on_unauthorized)
+        )
+
         # ── Header ───────────────────────────────────────────
-        header = tk.Frame(self, bg="#185FA5", height=48)
+        header = tk.Frame(self, bg="#E8500A", height=48)
         header.pack(fill="x", side="top")
         header.pack_propagate(False)
 
-        tk.Label(header, text="  Attendance & Sales System",
-                 bg="#185FA5", fg="white",
+        tk.Label(header, text="  Tiger Fitness Gym",
+                 bg="#E8500A", fg="white",
                  font=("", 12, "bold")).pack(side="left", padx=4)
 
-        role_color = "#9FE1CB" if api.is_admin else "#FAC775"
+        role_color = "#FF6B2B" if api.is_admin else "#FFB347"
         tk.Label(header,
                  text=f"{api.account_name}  "
                       f"[{api.account_type.upper()}]",
-                 bg="#185FA5", fg=role_color,
+                 bg="#E8500A", fg=role_color,
                  font=("", 9)).pack(side="right", padx=4)
 
         tk.Button(header, text="Logout",
-                  bg="#185FA5", fg="#B5D4F4",
+                  bg="#E8500A", fg="#FFD4B0",
                   relief="flat", cursor="hand2",
-                  activebackground="#0C447C",
+                  activebackground="#BF3D00",
                   activeforeground="white",
                   command=self._logout,
                   padx=10).pack(side="right", pady=8, padx=12)
@@ -100,7 +104,7 @@ class App(tk.Tk):
         body = tk.Frame(self)
         body.pack(fill="both", expand=True)
 
-        self._sidebar = tk.Frame(body, bg="#1a1a2e", width=176)
+        self._sidebar = tk.Frame(body, bg="#0D0D0D", width=176)
         self._sidebar.pack(fill="y", side="left")
         self._sidebar.pack_propagate(False)
 
@@ -142,16 +146,16 @@ class App(tk.Tk):
             ]
 
         tk.Label(self._sidebar, text="NAVIGATION",
-                 bg="#1a1a2e", fg="#5F5E5A",
+                 bg="#0D0D0D", fg="#666060",
                  font=("", 8), pady=12).pack(fill="x", padx=12)
 
         for label, ViewClass in nav_items:
             btn = tk.Button(
                 self._sidebar, text=label,
-                bg="#1a1a2e", fg="#B4B2A9",
+                bg="#0D0D0D", fg="#A09890",
                 relief="flat", anchor="w",
                 padx=14, pady=10,
-                activebackground="#185FA5",
+                activebackground="#E8500A",
                 activeforeground="white",
                 cursor="hand2",
                 command=lambda l=label: self._switch_view(l),
@@ -167,8 +171,8 @@ class App(tk.Tk):
     def _switch_view(self, label: str):
         for lbl, btn in self._nav_buttons.items():
             btn.config(
-                bg="#185FA5" if lbl == label else "#1a1a2e",
-                fg="white" if lbl == label else "#B4B2A9",
+                bg="#E8500A" if lbl == label else "#0D0D0D",
+                fg="white" if lbl == label else "#A09890",
             )
 
         if self._current_view:
@@ -204,24 +208,17 @@ class App(tk.Tk):
 
         while not self._scanner_stop.is_set():
 
-            # Backoff guard — if finger_touch returns in under 1s the scanner
-            # is unavailable and returning immediately. Sleep 5s to avoid
-            # hammering the backend with tight-loop requests.
-            _t0 = _time.monotonic()
-
             # Stage 1 — wait for physical touch, client stays idle
-            touched = api.finger_touch()
-
-            elapsed = _time.monotonic() - _t0
+            touched, scanner_available = api.finger_touch()
 
             if self._scanner_stop.is_set():
                 break
 
             if not touched:
-                if elapsed < 1.0:
-                    # Scanner unavailable — returned instantly, back off
+                if not scanner_available:
+                    # Scanner unavailable — back off 5s before retrying
                     _time.sleep(5.0)
-                # else: normal 30s timeout, retry immediately
+                # else: normal 30s timeout — retry immediately
                 continue
 
             # Stage 2 — finger detected, show "Reading..." now
@@ -248,13 +245,30 @@ class App(tk.Tk):
                 self._display_queue.put({"type": "clear"})
                 _time.sleep(1)
 
-    def _logout(self):
+    def _on_unauthorized(self):
+        """Called on main thread when any API request returns 401."""
+        from fapp.api_client import APIClient
+        APIClient.clear_unauthorized_handler()
         self._scanner_stop.set()
         api.logout()
         if self._client_win:
             self._client_win.destroy()
             self._client_win = None
-        self.title("Attendance & Sales System")
+        self.title("Tiger Fitness Gym")
+        import tkinter.messagebox as mb
+        mb.showwarning("Session Expired",
+                       "Your session has expired. Please log in again.")
+        self._show_login()
+
+    def _logout(self):
+        from fapp.api_client import APIClient
+        APIClient.clear_unauthorized_handler()
+        self._scanner_stop.set()
+        api.logout()
+        if self._client_win:
+            self._client_win.destroy()
+            self._client_win = None
+        self.title("Tiger Fitness Gym")
         self._show_login()
 
     def _clear(self):

@@ -7,7 +7,7 @@ from fapp.api_client import api, APIError
 
 
 class SalesOpenView(tk.Frame):
-    def __init__(self, master, display_queue=None):
+    def __init__(self, master, display_queue=None, **kwargs):
         super().__init__(master, bg="white")
         self._queue = display_queue
         self._selected_uid: int | None = None
@@ -54,6 +54,8 @@ class SalesOpenView(tk.Frame):
                              ("total", "Total ₱", 80)]:
             self._sale_tree.heading(col, text=txt)
             self._sale_tree.column(col, width=w, anchor="center")
+        self._sale_tree.column("uid", width=0, minwidth=0, stretch=False)
+        self._sale_tree.heading("uid", text="")
         sb = ttk.Scrollbar(left, orient="vertical",
                            command=self._sale_tree.yview)
         self._sale_tree.configure(yscrollcommand=sb.set)

@@ -4,7 +4,7 @@ from fapp.api_client import api, APIError
 
 
 class SubscriptionsView(tk.Frame):
-    def __init__(self, master, display_queue=None):
+    def __init__(self, master, display_queue=None, **kwargs):
         super().__init__(master, bg="white")
         self._build()
 
@@ -26,7 +26,7 @@ class SubscriptionsView(tk.Frame):
         tk.Button(bar, text="Edit", command=self._edit,
                   relief="flat", padx=10).pack(side="right", padx=4)
         tk.Button(bar, text="Add Plan", command=self._add,
-                  bg="#185FA5", fg="white",
+                  bg="#E8500A", fg="white",
                   relief="flat", padx=10).pack(side="right", padx=4)
 
         cols = ("name", "days", "price", "trainer",
@@ -95,11 +95,17 @@ class SubscriptionsView(tk.Frame):
             "Rename Plan", f"Rename '{name}' to:", parent=self)
         if not new_name or new_name.strip() == name:
             return
-        try:
-            api.rename_subscription(name, new_name.strip())
-            self.refresh()
-        except APIError as e:
-            messagebox.showerror("Error", str(e))
+        import threading
+        new_name = new_name.strip()
+        def _worker():
+            try:
+                api.rename_subscription(name, new_name)
+                self.after(0, self.refresh)
+            except APIError as e:
+                msg = str(e)
+                self.after(0, lambda msg=msg: messagebox.showerror(
+                    "Error", msg))
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _edit(self):
         name = self._selected_name()

@@ -12,7 +12,7 @@ class ClientDisplayWindow(tk.Toplevel):
     def __init__(self, master, event_queue: queue.Queue):
         super().__init__(master)
         self.title("Client Display")
-        self.configure(bg="#1a1a2e")
+        self.configure(bg="#0D0D0D")
         self.geometry("800x480")
         self.resizable(True, True)
         self._queue = event_queue
@@ -23,34 +23,34 @@ class ClientDisplayWindow(tk.Toplevel):
 
     def _build(self):
         # Idle screen
-        self._idle_frame = tk.Frame(self, bg="#1a1a2e")
+        self._idle_frame = tk.Frame(self, bg="#0D0D0D")
         self._idle_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
 
         tk.Label(self._idle_frame, text="Welcome",
-                 bg="#1a1a2e", fg="#185FA5",
+                 bg="#0D0D0D", fg="#E8500A",
                  font=("", 36, "bold")).pack(expand=True, pady=(60, 0))
 
         tk.Label(self._idle_frame,
                  text="Place your finger on the scanner",
-                 bg="#1a1a2e", fg="#5F5E5A",
+                 bg="#0D0D0D", fg="#666060",
                  font=("", 14)).pack(pady=(8, 0))
 
         self._clock_lbl = tk.Label(self._idle_frame, text="",
-                                   bg="#1a1a2e", fg="#B4B2A9",
+                                   bg="#0D0D0D", fg="#A09890",
                                    font=("", 20))
         self._clock_lbl.pack(pady=(20, 0))
 
         # Banner overlay
-        self._banner_frame = tk.Frame(self, bg="#1a1a2e")
+        self._banner_frame = tk.Frame(self, bg="#0D0D0D")
         self._banner_title = tk.Label(self._banner_frame, text="",
                                       font=("", 28, "bold"),
-                                      bg="#1a1a2e", fg="white",
+                                      bg="#0D0D0D", fg="white",
                                       wraplength=720, justify="center")
         self._banner_title.pack(expand=True, pady=(60, 8))
 
         self._banner_sub = tk.Label(self._banner_frame, text="",
                                     font=("", 16),
-                                    bg="#1a1a2e", fg="white",
+                                    bg="#0D0D0D", fg="white",
                                     wraplength=720, justify="center")
         self._banner_sub.pack(pady=(0, 20))
 
@@ -80,16 +80,16 @@ class ClientDisplayWindow(tk.Toplevel):
             return
 
         configs = {
-            "scanning":     ("#7B8CDE", "white", "#1a1a2e"),   # soft blue-purple
+            "scanning":     ("#FF9A5C", "white", "#0D0D0D"),   # soft blue-purple
             "time_in":      ("#1D9E75", "white", "#0a3d2e"),
-            "time_out":     ("#185FA5", "white", "#0a2240"),
+            "time_out":     ("#E8500A", "white", "#BF3D00"),
             "expiry_warn":  ("#BA7517", "white", "#3d2800"),
             "expired":      ("#C0392B", "white", "#3d0a0a"),
             "no_match":     ("#E67E22", "white", "#3d1f00"),
             "scanner_error":("#E67E22", "white", "#3d1f00"),
         }
 
-        accent, fg, bg = configs.get(etype, ("#185FA5", "white", "#0a2240"))
+        accent, fg, bg = configs.get(etype, ("#E8500A", "white", "#BF3D00"))
         title = event.get("title", "")
         subtitle = event.get("subtitle", "")
 

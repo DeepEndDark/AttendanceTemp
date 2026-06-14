@@ -16,13 +16,26 @@ def run_tick() -> None:
     tick_doc = tick_ref.get()
     today    = date.today()
 
+    # Already ticked today — nothing to do
     if tick_doc.exists:
         try:
             last = date.fromisoformat(
                 tick_doc.to_dict().get("last_tick_date", ""))
-        except ValueError:
-            last = today - timedelta(days=1)
-    else:
+            if last >= today:
+                return
+        except (ValueError, TypeError):
+            pass
+
+    # Skip entirely on first run with empty database
+    first_client = next(iter(clients().limit(1).stream()), None)
+    if first_client is None:
+        tick_ref.set({"last_tick_date": today.isoformat()}, merge=True)
+        return
+
+    try:
+        last = date.fromisoformat(
+            tick_doc.to_dict().get("last_tick_date", ""))             if tick_doc.exists else today - timedelta(days=1)
+    except (ValueError, TypeError):
         last = today - timedelta(days=1)
 
     days_missed = (today - last).days
@@ -176,21 +189,35 @@ def _tick_client(client_name: str, days: int) -> None:
                      if v.get("expires_at")]
     last_expires  = max(expiry_dates) if expiry_dates else None
 
-    # ── Tick locker ───────────────────────────────────────────
-    locker_days = client_data.get("client_locker_days_remaining", 0)
-    locker_num  = client_data.get("locker_number")
-    if locker_days > 0:
-        locker_days = max(0, locker_days - days)
+    # ── Tick lockers ──────────────────────────────────────────
+    lockers = client_data.get("lockers", [])
+
+    # Legacy migration: flat field → lockers list
+    if not lockers and client_data.get("locker_number"):
+        lockers = [{
+            "locker_number":  client_data["locker_number"],
+            "days_remaining": client_data.get("client_locker_days_remaining", 0),
+            "expires_at":     None,
+        }]
+
+    updated_lockers = []
+    for l in lockers:
+        remaining = max(0, l.get("days_remaining", 0) - days)
+        if remaining > 0:
+            updated_lockers.append({**l, "days_remaining": remaining})
+        # else: locker expired — drop it from the list
+
+    # Sync legacy flat fields
+    total_locker_days = sum(l["days_remaining"] for l in updated_lockers)
+    primary_locker    = updated_lockers[0]["locker_number"] if updated_lockers else None
 
     updates = {
         "client_days_remaining":         total_days,
         "client_trainer_days_remaining": total_trainer,
-        "client_locker_days_remaining":  locker_days,
+        "client_locker_days_remaining":  total_locker_days,
         "last_plan_expires_at":          last_expires,
+        "lockers":                       updated_lockers,
+        "locker_number":                 primary_locker,
     }
-
-    # Free locker when days hit 0
-    if locker_num is not None and locker_days == 0:
-        updates["locker_number"] = None
 
     client_ref.update(updates)

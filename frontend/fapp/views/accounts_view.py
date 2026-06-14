@@ -4,7 +4,7 @@ from fapp.api_client import api, APIError
 
 
 class AccountsView(tk.Frame):
-    def __init__(self, master, display_queue=None):
+    def __init__(self, master, display_queue=None, **kwargs):
         super().__init__(master, bg="white")
         self._build()
 
@@ -24,7 +24,7 @@ class AccountsView(tk.Frame):
         tk.Button(bar, text="Edit", command=self._edit,
                   relief="flat", padx=10).pack(side="right", padx=4)
         tk.Button(bar, text="Add Account", command=self._add,
-                  bg="#185FA5", fg="white",
+                  bg="#E8500A", fg="white",
                   relief="flat", padx=10).pack(side="right", padx=4)
 
         cols = ("name", "role")
@@ -34,7 +34,7 @@ class AccountsView(tk.Frame):
         self._tree.heading("role", text="Role")
         self._tree.column("name", width=220, anchor="center")
         self._tree.column("role", width=120, anchor="center")
-        self._tree.tag_configure("admin", foreground="#185FA5")
+        self._tree.tag_configure("admin", foreground="#E8500A")
 
         sb = ttk.Scrollbar(self, orient="vertical",
                            command=self._tree.yview)

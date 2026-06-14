@@ -19,22 +19,32 @@ router = APIRouter(prefix="/clients", tags=["clients"])
 def _recalc_totals(client_name: str) -> dict:
     active = list(
         client_subs(client_name).where("is_active", "==", True).stream())
-    total_days    = sum(s.to_dict().get("days_remaining", 0)
-                        for s in active)
-    total_trainer = sum(s.to_dict().get("trainer_days_remaining", 0)
-                        for s in active)
-    expiry_dates  = [s.to_dict().get("expires_at", "")
-                     for s in active
-                     if s.to_dict().get("expires_at")]
-    last_expires  = max(expiry_dates) if expiry_dates else None
+    total_days    = 0
+    total_trainer = 0
+    expiry_dates  = []
+    for s in active:
+        d = s.to_dict()
+        total_days    += d.get("days_remaining", 0)
+        total_trainer += d.get("trainer_days_remaining", 0)
+        exp = d.get("expires_at", "")
+        if exp:
+            expiry_dates.append(exp)
     return {
         "client_days_remaining":         total_days,
         "client_trainer_days_remaining": total_trainer,
-        "last_plan_expires_at":          last_expires,
+        "last_plan_expires_at":          max(expiry_dates) if expiry_dates else None,
     }
 
 
 def _doc_to_read(d: dict) -> ClientRead:
+    lockers = d.get("lockers", [])
+    # Legacy: if old single-locker fields exist and lockers list is empty, migrate
+    if not lockers and d.get("locker_number"):
+        lockers = [{
+            "locker_number":    d["locker_number"],
+            "days_remaining":   d.get("client_locker_days_remaining", 0),
+            "expires_at":       None,
+        }]
     return ClientRead(
         client_uid=d.get("client_uid", 0),
         client_name=d["client_name"],
@@ -46,9 +56,10 @@ def _doc_to_read(d: dict) -> ClientRead:
         client_days_remaining=d.get("client_days_remaining", 0),
         client_trainer_days_remaining=d.get(
             "client_trainer_days_remaining", 0),
-        client_locker_days_remaining=d.get(
-            "client_locker_days_remaining", 0),
-        locker_number=d.get("locker_number"),
+        client_locker_days_remaining=sum(
+            l.get("days_remaining", 0) for l in lockers),
+        locker_number=lockers[0]["locker_number"] if lockers else None,
+        lockers=lockers,
         created_at=d.get("created_at"),
         last_enrolled_at=d.get("last_enrolled_at"),
         last_plan_expires_at=d.get("last_plan_expires_at"),
@@ -119,8 +130,6 @@ def get_client(client_name: str, _: TokenData = Depends(require_any)):
             response_model=list[ClientSubRead])
 def get_client_subscriptions(client_name: str,
                               _: TokenData = Depends(require_any)):
-    if not clients().document(client_name).get().exists:
-        raise HTTPException(status_code=404, detail="Client not found")
     result = []
     for s in (client_subs(client_name)
               .order_by("subscribed_at").stream()):
@@ -176,6 +185,7 @@ def create_client(payload: ClientCreate,
             "trainer_duration_days", 0),
         "client_locker_days_remaining":  0,
         "locker_number":                 None,
+        "lockers":                       [],
         "created_at":                    now.isoformat(),
         "last_enrolled_at":              now.isoformat(),
         "last_plan_expires_at":          expires,

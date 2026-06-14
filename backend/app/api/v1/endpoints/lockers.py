@@ -1,37 +1,69 @@
+"""
+Locker management.
+
+Each client stores a `lockers` list:
+    [{locker_number: int, days_remaining: int, expires_at: str}]
+
+Multiple lockers per client are supported. Days stack per locker.
+Daily tick decrements every locker independently and removes expired ones.
+
+Legacy clients with flat locker_number / client_locker_days_remaining fields
+are handled transparently in _doc_to_read (clients.py).
+"""
 from datetime import date, timedelta
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from app.api.dependencies import require_admin, require_any
-from app.core.firestore_client import (
-    clients, db, next_sales_uid, system_state
-)
+from app.core.firestore_client import clients, db, next_sales_uid, system_state
 from app.schemas.token import TokenData
 
 router = APIRouter(prefix="/lockers", tags=["lockers"])
-
 SETTINGS_DOC = "settings"
 
+
+# ── Helpers ───────────────────────────────────────────────────
 
 def _get_settings() -> dict:
     doc = system_state().document(SETTINGS_DOC).get()
     if doc.exists:
         return doc.to_dict()
     return {
-        "total_lockers":           0,
-        "locker_price":            0.0,
-        "locker_rental_days":      30,
+        "total_lockers":            0,
+        "locker_price":             0.0,
+        "locker_rental_days":       30,
         "trainer_deduction_method": "fifo",
     }
 
 
-def _write_sale_log(client_name: str, price: float):
-    """Auto-create a closed sale log for a locker rental."""
-    today   = date.today().isoformat()
-    uid     = next_sales_uid()
-    # Touch parent date doc
-    db.collection("sale_logs").document(today).set(
-        {"_date": today}, merge=True)
+def _all_rented_numbers() -> set[int]:
+    """Set of all locker numbers currently assigned across all clients."""
+    rented = set()
+    for c in clients().stream():
+        d = c.to_dict()
+        for l in d.get("lockers", []):
+            n = l.get("locker_number")
+            if n:
+                rented.add(n)
+        # legacy field
+        legacy = d.get("locker_number")
+        if legacy:
+            rented.add(legacy)
+    return rented
+
+
+def _lowest_available(total: int) -> int | None:
+    rented = _all_rented_numbers()
+    for i in range(1, total + 1):
+        if i not in rented:
+            return i
+    return None
+
+
+def _write_sale_log(client_name: str, locker_number: int, price: float):
+    today = date.today().isoformat()
+    uid   = next_sales_uid()
+    db.collection("sale_logs").document(today).set({"_date": today}, merge=True)
     sale_ref = (db.collection("sale_logs")
                   .document(today)
                   .collection("sales")
@@ -44,7 +76,7 @@ def _write_sale_log(client_name: str, price: float):
         "sale_date":   today,
     })
     sale_ref.collection("items").add({
-        "item_name":        "Locker Rental",
+        "item_name":        f"Locker #{locker_number} Rental",
         "item_qty":         1,
         "item_total_price": round(price, 2),
         "is_subscription":  False,
@@ -52,26 +84,27 @@ def _write_sale_log(client_name: str, price: float):
     })
 
 
-def _lowest_available_locker(total: int) -> int | None:
-    """Return lowest locker number not currently assigned."""
-    rented = set()
-    for c in clients().where("locker_number", "!=", None).stream():
-        n = c.to_dict().get("locker_number")
-        if n:
-            rented.add(n)
-    for i in range(1, total + 1):
-        if i not in rented:
-            return i
-    return None
+def _sync_legacy(lockers: list[dict]) -> dict:
+    """Keep legacy flat fields in sync for any code still reading them."""
+    if not lockers:
+        return {
+            "locker_number":               None,
+            "client_locker_days_remaining": 0,
+        }
+    return {
+        "locker_number":               lockers[0]["locker_number"],
+        "client_locker_days_remaining": sum(
+            l.get("days_remaining", 0) for l in lockers),
+    }
 
 
 # ── Schemas ───────────────────────────────────────────────────
 
 class LockerSettings(BaseModel):
-    total_lockers:            int | None = None
+    total_lockers:            int | None   = None
     locker_price:             float | None = None
-    locker_rental_days:       int | None = None
-    trainer_deduction_method: str | None = None
+    locker_rental_days:       int | None   = None
+    trainer_deduction_method: str | None   = None
 
 
 class LockerRentRequest(BaseModel):
@@ -102,8 +135,7 @@ def get_settings(_: TokenData = Depends(require_any)):
 def update_settings(payload: LockerSettings,
                     _: TokenData = Depends(require_admin)):
     ref     = system_state().document(SETTINGS_DOC)
-    updates = {k: v for k, v in payload.model_dump().items()
-               if v is not None}
+    updates = {k: v for k, v in payload.model_dump().items() if v is not None}
     ref.set(updates, merge=True)
     return ref.get().to_dict()
 
@@ -114,11 +146,10 @@ def update_settings(payload: LockerSettings,
 def get_availability(_: TokenData = Depends(require_any)):
     s      = _get_settings()
     total  = s.get("total_lockers", 0)
-    rented = len(list(
-        clients().where("locker_number", "!=", None).stream()))
+    rented = len(_all_rented_numbers())
     return LockerAvailability(
         total=total,
-        rented=rented,
+        rented=min(rented, total),
         available=max(0, total - rented),
         price=s.get("locker_price", 0.0),
         rental_days=s.get("locker_rental_days", 30),
@@ -130,6 +161,10 @@ def get_availability(_: TokenData = Depends(require_any)):
 @router.post("/rent")
 def rent_locker(payload: LockerRentRequest,
                 _: TokenData = Depends(require_any)):
+    """
+    Auto-assigns the lowest available locker, or stacks days on the
+    client's first existing locker if they already have one.
+    """
     s           = _get_settings()
     total       = s.get("total_lockers", 0)
     rental_days = s.get("locker_rental_days", 30)
@@ -144,43 +179,45 @@ def rent_locker(payload: LockerRentRequest,
     today   = date.today()
     expires = (today + timedelta(days=rental_days - 1)).isoformat()
 
-    current_locker = client_data.get("locker_number")
-    current_days   = client_data.get("client_locker_days_remaining", 0)
+    lockers: list[dict] = client_data.get("lockers", [])
 
-    if current_locker is not None:
-        # Additive — same locker, more days
-        client_ref.update({
-            "client_locker_days_remaining": current_days + rental_days
-        })
-        assigned = current_locker
+    # Legacy migration: if client has flat fields but no lockers list
+    if not lockers and client_data.get("locker_number"):
+        lockers = [{
+            "locker_number":  client_data["locker_number"],
+            "days_remaining": client_data.get("client_locker_days_remaining", 0),
+            "expires_at":     None,
+        }]
+
+    if lockers:
+        # Stack days on first existing locker
+        lockers[0]["days_remaining"] += rental_days
+        lockers[0]["expires_at"]      = expires
+        assigned = lockers[0]["locker_number"]
     else:
-        assigned = _lowest_available_locker(total)
+        assigned = _lowest_available(total)
         if assigned is None:
-            raise HTTPException(status_code=400,
-                                detail="No lockers available")
-        client_ref.update({
-            "locker_number":               assigned,
-            "client_locker_days_remaining": rental_days,
+            raise HTTPException(status_code=400, detail="No lockers available")
+        lockers.append({
+            "locker_number":  assigned,
+            "days_remaining": rental_days,
+            "expires_at":     expires,
         })
 
-    db.collection("locker_rentals").add({
-        "client_name":       payload.client_name,
-        "locker_number":     assigned,
-        "rented_at":         today.isoformat(),
-        "expires_at":        expires,
-        "days_added":        rental_days,
-        "assigned_by_admin": False,
+    client_ref.update({
+        "lockers": lockers,
+        **_sync_legacy(lockers),
     })
 
-    _write_sale_log(payload.client_name, price)
+    _write_sale_log(payload.client_name, assigned, price)
 
     return {
-        "client_name":                payload.client_name,
-        "locker_number":              assigned,
-        "days_added":                 rental_days,
-        "expires_at":                 expires,
-        "client_locker_days_remaining":
-            client_ref.get().to_dict().get("client_locker_days_remaining"),
+        "client_name":  payload.client_name,
+        "locker_number": assigned,
+        "days_added":   rental_days,
+        "expires_at":   expires,
+        "client_locker_days_remaining": sum(
+            l["days_remaining"] for l in lockers),
     }
 
 
@@ -190,9 +227,10 @@ def rent_locker(payload: LockerRentRequest,
 def assign_locker(payload: LockerAssignRequest,
                   _: TokenData = Depends(require_any)):
     """
-    Admin assigns a specific locker number to a client.
-    Additive if client already has a locker (same locker, more days).
-    Rejected if the chosen number is held by a different client.
+    Assign a specific locker number to a client.
+    - If client already has THIS locker → stacks days (additive).
+    - If client already has a DIFFERENT locker → adds as second locker.
+    - If locker is held by a different client → rejected.
     """
     s           = _get_settings()
     total       = s.get("total_lockers", 0)
@@ -203,7 +241,7 @@ def assign_locker(payload: LockerAssignRequest,
         raise HTTPException(
             status_code=400,
             detail=f"Locker #{payload.locker_number} does not exist "
-                   f"(total lockers: {total})")
+                   f"(total: {total})")
 
     client_ref = clients().document(payload.client_name)
     client_doc = client_ref.get()
@@ -211,42 +249,66 @@ def assign_locker(payload: LockerAssignRequest,
         raise HTTPException(status_code=404, detail="Client not found")
     client_data = client_doc.to_dict()
 
-    # Check if chosen locker is already taken by someone else
-    for other in (clients()
-                  .where("locker_number", "==", payload.locker_number)
-                  .stream()):
-        if other.id != payload.client_name:
+    # Check if locker is already taken by a different client
+    for other in clients().stream():
+        if other.id == payload.client_name:
+            continue
+        d = other.to_dict()
+        for l in d.get("lockers", []):
+            if l.get("locker_number") == payload.locker_number:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Locker #{payload.locker_number} is already "
+                           f"assigned to '{other.id}'")
+        # legacy field
+        if d.get("locker_number") == payload.locker_number:
             raise HTTPException(
                 status_code=409,
                 detail=f"Locker #{payload.locker_number} is already "
                        f"assigned to '{other.id}'")
 
-    today        = date.today()
-    expires      = (today + timedelta(days=rental_days - 1)).isoformat()
-    current_days = client_data.get("client_locker_days_remaining", 0)
+    today   = date.today()
+    expires = (today + timedelta(days=rental_days - 1)).isoformat()
+
+    lockers: list[dict] = client_data.get("lockers", [])
+
+    # Legacy migration
+    if not lockers and client_data.get("locker_number"):
+        lockers = [{
+            "locker_number":  client_data["locker_number"],
+            "days_remaining": client_data.get("client_locker_days_remaining", 0),
+            "expires_at":     None,
+        }]
+
+    # Check if client already has this specific locker → stack days
+    existing = next(
+        (l for l in lockers if l["locker_number"] == payload.locker_number),
+        None)
+    if existing:
+        existing["days_remaining"] += rental_days
+        existing["expires_at"]      = expires
+    else:
+        # New locker for this client
+        lockers.append({
+            "locker_number":  payload.locker_number,
+            "days_remaining": rental_days,
+            "expires_at":     expires,
+        })
 
     client_ref.update({
-        "locker_number":               payload.locker_number,
-        "client_locker_days_remaining": current_days + rental_days,
+        "lockers": lockers,
+        **_sync_legacy(lockers),
     })
 
-    db.collection("locker_rentals").add({
-        "client_name":       payload.client_name,
-        "locker_number":     payload.locker_number,
-        "rented_at":         today.isoformat(),
-        "expires_at":        expires,
-        "days_added":        rental_days,
-        "assigned_by_admin": True,
-    })
-
-    _write_sale_log(payload.client_name, price)
+    _write_sale_log(payload.client_name, payload.locker_number, price)
 
     return {
-        "client_name":                payload.client_name,
-        "locker_number":              payload.locker_number,
-        "days_added":                 rental_days,
-        "expires_at":                 expires,
-        "client_locker_days_remaining": current_days + rental_days,
+        "client_name":   payload.client_name,
+        "locker_number": payload.locker_number,
+        "days_added":    rental_days,
+        "expires_at":    expires,
+        "client_locker_days_remaining": sum(
+            l["days_remaining"] for l in lockers),
     }
 
 
@@ -254,40 +316,84 @@ def assign_locker(payload: LockerAssignRequest,
 
 @router.get("/rentals")
 def list_rentals(_: TokenData = Depends(require_admin)):
-    return [d.to_dict() for d in
-            db.collection("locker_rentals").stream()]
+    """All locker rental sale records across all clients."""
+    results = []
+    for sale_doc in db.collection_group("sales") \
+                      .where("sale_status", "==", "closed").stream():
+        for item in sale_doc.reference.collection("items") \
+                            .where("is_locker", "==", True).stream():
+            results.append({
+                **sale_doc.to_dict(),
+                "item": item.to_dict(),
+            })
+    return results
 
 
 @router.get("/rentals/{client_name}")
 def get_client_rentals(client_name: str,
                        _: TokenData = Depends(require_any)):
-    return [d.to_dict() for d in
-            db.collection("locker_rentals")
-              .where("client_name", "==", client_name)
-              .order_by("rented_at", direction="DESCENDING")
-              .stream()]
+    """Locker rental sale records for a specific client."""
+    results = []
+    for sale_doc in db.collection_group("sales") \
+                      .where("client_name", "==", client_name) \
+                      .where("sale_status", "==", "closed").stream():
+        for item in sale_doc.reference.collection("items") \
+                            .where("is_locker", "==", True).stream():
+            results.append({
+                **sale_doc.to_dict(),
+                "item": item.to_dict(),
+            })
+    return results
 
 
-# ── Unassign locker (admin only) ──────────────────────────────
+# ── Unassign specific locker (admin only) ─────────────────────
 
 @router.delete("/unassign/{locker_number}", status_code=200)
 def unassign_locker(locker_number: int,
                     _: TokenData = Depends(require_admin)):
     """
-    Admin only. Removes locker from client immediately.
-    Remaining days are forfeited -- no refund recorded.
+    Admin only. Removes a specific locker from whichever client holds it.
+    Remaining days for that locker are forfeited.
     """
-    # Find the client holding this locker
-    results = list(
-        clients().where("locker_number", "==", locker_number).stream())
-    if not results:
+    owner_ref  = None
+    owner_name = None
+    owner_data = None
+
+    for doc in clients().stream():
+        d = doc.to_dict()
+        # Check new lockers list
+        for l in d.get("lockers", []):
+            if l.get("locker_number") == locker_number:
+                owner_ref  = doc.reference
+                owner_name = d.get("client_name", doc.id)
+                owner_data = d
+                break
+        # Check legacy field
+        if not owner_ref and d.get("locker_number") == locker_number:
+            owner_ref  = doc.reference
+            owner_name = d.get("client_name", doc.id)
+            owner_data = d
+        if owner_ref:
+            break
+
+    if not owner_ref:
         raise HTTPException(status_code=404,
                             detail=f"Locker #{locker_number} is not assigned.")
 
-    client_ref = results[0].reference
-    client_ref.update({
-        "locker_number":               None,
-        "client_locker_days_remaining": 0,
+    lockers = owner_data.get("lockers", [])
+    if not lockers and owner_data.get("locker_number") == locker_number:
+        # Legacy only
+        lockers = []
+    else:
+        lockers = [l for l in lockers if l["locker_number"] != locker_number]
+
+    owner_ref.update({
+        "lockers": lockers,
+        **_sync_legacy(lockers),
     })
-    return {"unassigned": locker_number,
-            "client_name": results[0].to_dict().get("client_name")}
+
+    return {
+        "unassigned":  locker_number,
+        "client_name": owner_name,
+        "lockers_remaining": len(lockers),
+    }

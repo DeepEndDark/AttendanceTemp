@@ -13,7 +13,7 @@ COLS = 8   # lockers per row in the grid
 
 
 class LockerView(tk.Frame):
-    def __init__(self, master, display_queue=None):
+    def __init__(self, master, display_queue=None, **kwargs):
         super().__init__(master, bg="white")
         self._is_admin = False
         self._locker_data: dict[int, dict] = {}
@@ -43,23 +43,23 @@ class LockerView(tk.Frame):
             relief="flat", padx=10)
         tk.Button(bar, text="Assign Locker",
                   command=self._assign_locker,
-                  bg="#185FA5", fg="white",
+                  bg="#E8500A", fg="white",
                   relief="flat", padx=10).pack(side="right", padx=4)
 
-        summary = tk.Frame(self, bg="#E6F1FB", relief="groove", bd=1)
+        summary = tk.Frame(self, bg="#FFF0E8", relief="groove", bd=1)
         summary.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 8))
-        self._avail_lbl = tk.Label(summary, text="", bg="#E6F1FB",
+        self._avail_lbl = tk.Label(summary, text="", bg="#FFF0E8",
                                    font=("", 10), pady=8)
         self._avail_lbl.pack(side="left", padx=16)
 
-        leg = tk.Frame(summary, bg="#E6F1FB")
+        leg = tk.Frame(summary, bg="#FFF0E8")
         leg.pack(side="right", padx=16)
         for color, label in [("#2ECC71", "Available"),
-                              ("#185FA5", "Rented"),
+                              ("#E8500A", "Rented"),
                               ("#BA7517", "Expiring ≤3 days")]:
             tk.Frame(leg, bg=color, width=14, height=14).pack(
                 side="left", padx=(8, 2))
-            tk.Label(leg, text=label, bg="#E6F1FB",
+            tk.Label(leg, text=label, bg="#FFF0E8",
                      font=("", 9)).pack(side="left", padx=(0, 8))
 
         grid_container = tk.Frame(self, bg="white")
@@ -138,10 +138,27 @@ class LockerView(tk.Frame):
         self._is_admin = api.is_admin
         self._total    = avail["total"]
 
-        self._locker_data = {
-            c["locker_number"]: c
-            for c in clients if c.get("locker_number")
-        }
+        # Build locker_data from new lockers list + legacy fallback
+        self._locker_data = {}
+        for c in clients:
+            for l in c.get("lockers", []):
+                num = l.get("locker_number")
+                if num:
+                    self._locker_data[num] = {
+                        "client_name":                c["client_name"],
+                        "client_locker_days_remaining": l.get("days_remaining", 0),
+                        "expires_at":                 l.get("expires_at"),
+                        "locker_number":              num,
+                    }
+            # Legacy fallback
+            if not c.get("lockers") and c.get("locker_number"):
+                num = c["locker_number"]
+                self._locker_data[num] = {
+                    "client_name":                c["client_name"],
+                    "client_locker_days_remaining": c.get("client_locker_days_remaining", 0),
+                    "expires_at":                 None,
+                    "locker_number":              num,
+                }
 
         self._avail_lbl.config(
             text=(f"Total: {avail['total']}   |   "
@@ -192,8 +209,9 @@ class LockerView(tk.Frame):
                 bg, fg = "#2ECC71", "white"
                 label = f"#{num}\nFree"
             else:
-                days = c["client_locker_days_remaining"]
-                bg   = "#BA7517" if days <= 3 else "#185FA5"
+                # Use per-locker days_remaining, not the total across all lockers
+                days = c.get("days_remaining", c.get("client_locker_days_remaining", 0))
+                bg   = "#BA7517" if days <= 3 else "#E8500A"
                 fg   = "white"
                 name_short = c["client_name"][:10] + "…" \
                     if len(c["client_name"]) > 10 else c["client_name"]
@@ -220,12 +238,11 @@ class LockerView(tk.Frame):
             self._status.config(
                 text=f"Selected: Locker #{num} — {c['client_name']} "
                      f"({c['client_locker_days_remaining']} days remaining)",
-                fg="#185FA5")
+                fg="#E8500A")
         else:
             self._status.config(
                 text=f"Selected: Locker #{num} — Available",
                 fg="#2ECC71")
-
     # ---------------------------------------------------------
     # Assign locker
     # ---------------------------------------------------------
@@ -233,19 +250,27 @@ class LockerView(tk.Frame):
     def _assign_locker(self):
         if self._loading:
             return
-        if self._selected_locker and self._selected_locker in self._locker_data:
-            c = self._locker_data[self._selected_locker]
-            messagebox.showwarning(
-                "Locker Occupied",
-                f"Locker #{self._selected_locker} is already assigned to "
-                f"'{c['client_name']}' ({c['client_locker_days_remaining']} days remaining).\n\n"
-                "Unassign it first before reassigning.")
-            return
 
         preselect = (self._selected_locker
                      if self._selected_locker and
                      self._selected_locker not in self._locker_data
                      else None)
+
+        # If selected locker is occupied by a *different* client — block
+        if (self._selected_locker and
+                self._selected_locker in self._locker_data):
+            c = self._locker_data[self._selected_locker]
+            # Pre-select the owning client in the dialog so staff can
+            # stack days easily — don't block, just inform
+            messagebox.showinfo(
+                "Locker Occupied",
+                f"Locker #{self._selected_locker} is currently held by "
+                f"'{c['client_name']}' ({c['client_locker_days_remaining']} "
+                f"days remaining).\n\n"
+                "To add more days, select the same client and locker "
+                "in the assign dialog.")
+            # Pre-select locker number so dialog opens with it filled
+            preselect = self._selected_locker
 
         self._set_loading(True, "Loading clients...")
         self._run_worker(
@@ -266,9 +291,11 @@ class LockerView(tk.Frame):
 
     def _assign_dialog(self, avail: dict, clients: list, preselect: int | None):
         self._set_loading(False)
+        rented = set(self._locker_data.keys())
         dlg = _AssignDialog(self, total=avail["total"],
                             all_clients=clients,
-                            preselect_locker=preselect)
+                            preselect_locker=preselect,
+                            rented_numbers=rented)
         if not dlg.result:
             return
         client_name   = dlg.result["client_name"]
@@ -313,22 +340,41 @@ class LockerView(tk.Frame):
             clients = api.list_clients()
             avail   = api.get_locker_availability()
             self.after(0, lambda: self._tile_complete(num, clients, avail))
-        except APIError:
-            pass
-        except Exception:
-            pass
+        except APIError as e:
+            msg = str(e)
+            self.after(0, lambda msg=msg: self._show_error(msg))
+        except Exception as e:
+            msg = f"Tile refresh error: {e}"
+            self.after(0, lambda msg=msg: self._show_error(msg))
 
     def _tile_complete(self, num: int, clients: list, avail: dict):
-        self._locker_data = {
-            c["locker_number"]: c
-            for c in clients if c.get("locker_number")
-        }
+        # Build locker_data from new lockers list + legacy fallback
+        self._locker_data = {}
+        for c in clients:
+            for l in c.get("lockers", []):
+                num = l.get("locker_number")
+                if num:
+                    self._locker_data[num] = {
+                        "client_name":                c["client_name"],
+                        "client_locker_days_remaining": l.get("days_remaining", 0),
+                        "expires_at":                 l.get("expires_at"),
+                        "locker_number":              num,
+                    }
+            # Legacy fallback
+            if not c.get("lockers") and c.get("locker_number"):
+                num = c["locker_number"]
+                self._locker_data[num] = {
+                    "client_name":                c["client_name"],
+                    "client_locker_days_remaining": c.get("client_locker_days_remaining", 0),
+                    "expires_at":                 None,
+                    "locker_number":              num,
+                }
         c = self._locker_data.get(num)
         if c is None:
             bg, fg, label = "#2ECC71", "white", f"#{num}\nFree"
         else:
-            days       = c["client_locker_days_remaining"]
-            bg         = "#BA7517" if days <= 3 else "#185FA5"
+            days       = c.get("days_remaining", c.get("client_locker_days_remaining", 0))
+            bg         = "#BA7517" if days <= 3 else "#E8500A"
             fg         = "white"
             name_short = c["client_name"][:10] + "…" \
                 if len(c["client_name"]) > 10 else c["client_name"]
@@ -391,7 +437,8 @@ class LockerView(tk.Frame):
 
 class _AssignDialog(tk.Toplevel):
     def __init__(self, parent, total: int, all_clients: list,
-                 preselect_locker: int | None = None):
+                 preselect_locker: int | None = None,
+                 rented_numbers: set | None = None):
         super().__init__(parent)
         self.title("Assign Locker")
         self.configure(bg="white")
@@ -404,7 +451,7 @@ class _AssignDialog(tk.Toplevel):
 
         tk.Label(frame, text="Assign Locker",
                  font=("", 11, "bold"), bg="white",
-                 fg="#185FA5").grid(row=0, column=0, columnspan=2,
+                 fg="#E8500A").grid(row=0, column=0, columnspan=2,
                                     sticky="w", pady=(0, 12))
 
         tk.Label(frame, text="Client:", bg="white",
@@ -416,14 +463,33 @@ class _AssignDialog(tk.Toplevel):
         if all_clients:
             cb.current(0)
 
+        # Build locker number list: show all, mark occupied ones
+        rented = rented_numbers or set()
+        locker_options = []
+        for n in range(1, total + 1):
+            if n == preselect_locker and n in rented:
+                locker_options.append(f"#{n} — Renew / Add Days")
+            elif n in rented:
+                locker_options.append(f"#{n} — Occupied")
+            else:
+                locker_options.append(f"#{n} — Available")
+
         tk.Label(frame, text=f"Locker # (1–{total}):",
                  bg="white", font=("", 9)).grid(
             row=2, column=0, sticky="w", pady=6)
-        self._num_var = tk.StringVar(
-            value=str(preselect_locker) if preselect_locker else "")
-        tk.Entry(frame, textvariable=self._num_var,
-                 width=10, relief="solid", bd=1).grid(
-            row=2, column=1, sticky="w", padx=(10, 0), pady=6)
+        self._num_var = tk.StringVar()
+        lcb = ttk.Combobox(frame, textvariable=self._num_var,
+                           values=locker_options, state="readonly", width=26)
+        lcb.grid(row=2, column=1, sticky="w", padx=(10, 0), pady=6)
+        # Pre-select the locker
+        if preselect_locker and 1 <= preselect_locker <= total:
+            lcb.current(preselect_locker - 1)
+        else:
+            # Default to first available
+            for i, opt in enumerate(locker_options):
+                if "Available" in opt:
+                    lcb.current(i)
+                    break
 
         self._err = tk.Label(frame, text="", fg="red",
                              bg="white", font=("", 9))
@@ -439,7 +505,7 @@ class _AssignDialog(tk.Toplevel):
         tk.Button(btn_row, text="Assign",
                   command=self._save,
                   relief="flat", padx=12, pady=6,
-                  bg="#185FA5", fg="white").pack(side="right")
+                  bg="#E8500A", fg="white").pack(side="right")
         self.wait_window()
 
     def _save(self):
@@ -447,12 +513,19 @@ class _AssignDialog(tk.Toplevel):
         if not client:
             self._err.config(text="Select a client.")
             return
+        raw = self._num_var.get()
+        if not raw:
+            self._err.config(text="Select a locker.")
+            return
         try:
-            num = int(self._num_var.get())
-            if num < 1:
-                raise ValueError
+            num = int(raw.split("—")[0].replace("#", "").strip())
         except ValueError:
-            self._err.config(text="Locker number must be a positive integer.")
+            self._err.config(text="Invalid locker selection.")
+            return
+        if "Occupied" in raw:
+            self._err.config(
+                text=f"Locker #{num} is occupied by another client. "
+                     "Select an available locker.")
             return
         self.result = {"client_name": client, "locker_number": num}
         self.destroy()

@@ -11,11 +11,11 @@ class LoginView(tk.Frame):
 
     def _build(self):
         self.columnconfigure(0, weight=1)
-        header = tk.Frame(self, bg="#185FA5", height=64)
+        header = tk.Frame(self, bg="#E8500A", height=64)
         header.grid(row=0, column=0, sticky="ew")
         header.pack_propagate(False)
-        tk.Label(header, text="Attendance & Sales System",
-                 bg="#185FA5", fg="white",
+        tk.Label(header, text="Tiger Fitness Gym",
+                 bg="#E8500A", fg="white",
                  font=("", 14, "bold")).pack(expand=True)
 
         tk.Label(self, text="Sign in to continue",
@@ -39,7 +39,7 @@ class LoginView(tk.Frame):
         self._pass.bind("<Return>", lambda _: self._login())
 
         tk.Button(form, text="Sign In", command=self._login,
-                  bg="#185FA5", fg="white", relief="flat",
+                  bg="#E8500A", fg="white", relief="flat",
                   padx=16, pady=8, width=22).grid(row=4, column=0)
 
         self._status = tk.Label(self, text="", fg="red",

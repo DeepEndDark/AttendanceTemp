@@ -11,6 +11,7 @@ Conservative fixes:
 """
 
 import threading
+import time
 import requests
 
 BASE_URL = "http://127.0.0.1:8000/api/v1"
@@ -27,8 +28,9 @@ class APIError(Exception):
 
 class DataCache:
     """
-    Thread-safe key-value cache for Firestore collection data.
+    Thread-safe key-value cache with TTL for Firestore collection data.
     Keys map to the last fetched result. A None value means not yet loaded.
+    TTL defaults to 300s (5 minutes) — entries auto-expire silently.
     """
 
     KEYS = [
@@ -42,36 +44,50 @@ class DataCache:
         "sales",
     ]
 
+    TTL = 300.0   # seconds before a cached entry is considered stale
+
     def __init__(self):
-        self._data: dict = {}
+        self._data:  dict = {}
+        self._times: dict = {}   # key -> timestamp of last set()
         self._locks: dict = {k: threading.Lock() for k in self.KEYS}
         self._ready: dict = {k: threading.Event() for k in self.KEYS}
 
     def set(self, key: str, value) -> None:
         with self._locks.get(key, threading.Lock()):
-            self._data[key] = value
+            self._data[key]  = value
+            self._times[key] = time.monotonic()
             ev = self._ready.get(key)
             if ev:
                 ev.set()
 
     def get(self, key: str, timeout: float = 0.0):
         """
-        Return cached value. If not yet loaded and timeout > 0, wait up to
-        timeout seconds for a background fetch to complete.
-        Returns None if still not available.
+        Return cached value if still within TTL.
+        If not yet loaded and timeout > 0, wait up to timeout seconds.
+        Returns None if unavailable or expired (triggers a fresh fetch).
         """
-
         ev = self._ready.get(key)
 
         if ev and not ev.is_set() and timeout > 0:
             ev.wait(timeout=timeout)
 
-        return self._data.get(key)
+        # Read data and timestamp atomically under the lock
+        with self._locks.get(key, threading.Lock()):
+            ts = self._times.get(key)
+            if ts is not None and (time.monotonic() - ts) > self.TTL:
+                # Expired — clear under same lock
+                self._data.pop(key, None)
+                self._times.pop(key, None)
+                if ev:
+                    ev.clear()
+                return None
+            return self._data.get(key)
 
     def invalidate(self, *keys: str) -> None:
         for key in keys:
             with self._locks.get(key, threading.Lock()):
                 self._data.pop(key, None)
+                self._times.pop(key, None)
                 ev = self._ready.get(key)
                 if ev:
                     ev.clear()
@@ -80,16 +96,37 @@ class DataCache:
         for key in self.KEYS:
             with self._locks.get(key, threading.Lock()):
                 self._data.pop(key, None)
+                self._times.pop(key, None)
                 ev = self._ready.get(key)
                 if ev:
                     ev.clear()
 
     def is_ready(self, key: str) -> bool:
         ev = self._ready.get(key)
+        ts = self._times.get(key)
+        if ts is not None and (time.monotonic() - ts) > self.TTL:
+            return False
         return bool(ev and ev.is_set())
 
 
 class APIClient:
+    """Thin wrapper around requests.Session for the backend.
+
+    Register a 401 handler via APIClient.set_unauthorized_handler(fn) after
+    login. When any request returns 401 (expired/invalid token) the handler
+    is called on the Tkinter main thread so it can redirect to login.
+    """
+
+    _on_unauthorized = None   # set by frontend_main after login
+
+    @classmethod
+    def set_unauthorized_handler(cls, fn):
+        cls._on_unauthorized = fn
+
+    @classmethod
+    def clear_unauthorized_handler(cls):
+        cls._on_unauthorized = None
+
     def __init__(self):
         self._token: str | None = None
         self.account_name: str | None = None
@@ -380,14 +417,15 @@ class APIClient:
         return r
 
     def delete_attendance(self, log_uid: int):
-        return self._delete(f"/attendance/{log_uid}")
+        r = self._delete(f"/attendance/{log_uid}")
+        self._refresh_bg("clients")
+        return r
 
     def finger_touch(self):
         """
         Blocks up to ~32 s waiting for a finger to be physically placed.
-        Returns True on touch, False on timeout or error.
+        Returns (touched: bool, scanner_available: bool).
         """
-
         try:
             r = self._session.post(
                 f"{BASE_URL}/attendance/finger-touch",
@@ -395,14 +433,12 @@ class APIClient:
                 headers=self._headers(),
                 timeout=(5, 35),  # read timeout > server-side 30 s
             )
-
             if r.status_code == 200:
-                return r.json().get("touched", False)
-
+                data = r.json()
+                return data.get("touched", False), data.get("scanner_available", True)
         except Exception:
             pass
-
-        return False
+        return False, False
 
     def fingerprint_scan(self):
         """
@@ -601,12 +637,6 @@ class APIClient:
         self._refresh_bg("locker_availability", "clients")
         return r
 
-    def list_locker_rentals(self):
-        return self._get("/lockers/rentals")
-
-    def get_client_locker_rentals(self, name):
-        return self._get(f"/lockers/rentals/{name}")
-
     # ── Reports ───────────────────────────────────────────────
 
     def get_daily_report(self, date_str):
@@ -689,6 +719,10 @@ class APIClient:
             timeout=DEFAULT_TIMEOUT,
         )
         self._raise(r)
+        try:
+            return r.json()
+        except Exception:
+            return {}
 
     def _delete_json(self, path):
         r = self._session.delete(
@@ -707,7 +741,15 @@ class APIClient:
             except Exception:
                 detail = r.text
 
-            raise APIError(str(detail), r.status_code)
+            exc = APIError(str(detail), r.status_code)
+
+            if r.status_code == 401 and APIClient._on_unauthorized:
+                try:
+                    APIClient._on_unauthorized()
+                except Exception:
+                    pass
+
+            raise exc
 
 
 api = APIClient()

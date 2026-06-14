@@ -178,20 +178,26 @@ def _populate_tree(tree: ttk.Treeview, report: dict):
         tree.item(sec, open=True)
 
     # ── Grand total ──────────────────────────────────────────
-    tree.insert("", "end",
-                values=("", "GRAND TOTAL", "", f"{grand:.2f}", ""),
-                tags=("grand",))
+    if purchases:
+        tree.insert("", "end",
+                    values=("", "GRAND TOTAL", "", f"{grand:.2f}", ""),
+                    tags=("grand",))
+    else:
+        tree.insert("", "end",
+                    values=("No sales recorded for this period.",
+                            "", "", "", ""),
+                    tags=("section",))
 
 
 def _configure_tags(tree: ttk.Treeview):
-    tree.tag_configure("section",    background="#185FA5",
+    tree.tag_configure("section",    background="#E8500A",
                        foreground="white", font=("", 10, "bold"))
-    tree.tag_configure("client_hdr", background="#dce8f5",
+    tree.tag_configure("client_hdr", background="#FFE4D4",
                        font=("", 9, "bold"))
     tree.tag_configure("item_row",   background="white")
     tree.tag_configure("subtotal",   background="#E1F5EE",
                        font=("", 9, "bold"))
-    tree.tag_configure("grand",      background="#0C447C",
+    tree.tag_configure("grand",      background="#BF3D00",
                        foreground="white", font=("", 10, "bold"))
 
 
@@ -248,7 +254,7 @@ class _DailyReportTab(tk.Frame):
                   relief="flat", padx=8).pack(side="left", padx=2)
         self._load_btn = tk.Button(ctrl, text="Load",
                                    command=self._load,
-                                   bg="#185FA5", fg="white",
+                                   bg="#E8500A", fg="white",
                                    relief="flat", padx=10)
         self._load_btn.pack(side="left", padx=6)
         self._pdf_btn = tk.Button(ctrl, text="Export PDF",
@@ -314,11 +320,16 @@ class _DailyReportTab(tk.Frame):
         _populate_tree(self._tree, report)
         grand     = report.get("total_revenue", 0.0)
         purchases = report.get("purchases", [])
-        self._summary_lbl.config(
-            text=(f"Date: {report['report_date']}  |  "
-                  f"{len(purchases)} client(s)  |  "
-                  f"Total Revenue: ₱{grand:.2f}"),
-            fg="#185FA5")
+        if not purchases:
+            self._summary_lbl.config(
+                text=f"No sales recorded for {report.get('report_date', 'this date')}.",
+                fg="gray")
+        else:
+            self._summary_lbl.config(
+                text=(f"Date: {report.get('report_date', self._date_var.get())}  |  "
+                      f"{len(purchases)} client(s)  |  "
+                      f"Total Revenue: ₱{grand:.2f}"),
+                fg="#E8500A")
         self._set_loading(False)
 
     def _load_error(self, msg: str):
@@ -382,7 +393,7 @@ class _MonthlyReportTab(tk.Frame):
         self._period_lbl = tk.Label(
             ctrl,
             text=self._period_text(),
-            bg="white", font=("", 10, "bold"), fg="#185FA5")
+            bg="white", font=("", 10, "bold"), fg="#E8500A")
         self._period_lbl.pack(side="left")
 
         tk.Button(ctrl, text="📅 Pick Month",
@@ -394,7 +405,7 @@ class _MonthlyReportTab(tk.Frame):
 
         self._load_btn = tk.Button(ctrl, text="Load",
                                    command=self._load,
-                                   bg="#185FA5", fg="white",
+                                   bg="#E8500A", fg="white",
                                    relief="flat", padx=10)
         self._load_btn.pack(side="left", padx=6)
         self._pdf_btn = tk.Button(ctrl, text="Export PDF",
@@ -477,11 +488,16 @@ class _MonthlyReportTab(tk.Frame):
         purchases = report.get("purchases", [])
         m = report.get("month", int(self._month_var.get()))
         y = report.get("year",  int(self._year_var.get()))
-        self._summary_lbl.config(
-            text=(f"{month_name[m]} {y}  |  "
-                  f"{len(purchases)} client(s)  |  "
-                  f"Total Revenue: ₱{grand:.2f}"),
-            fg="#185FA5")
+        if not purchases:
+            self._summary_lbl.config(
+                text=f"No sales recorded for {month_name[m]} {y}.",
+                fg="gray")
+        else:
+            self._summary_lbl.config(
+                text=(f"{month_name[m]} {y}  |  "
+                      f"{len(purchases)} client(s)  |  "
+                      f"Total Revenue: ₱{grand:.2f}"),
+                fg="#E8500A")
         self._set_loading(False)
 
     def _load_error(self, msg: str):

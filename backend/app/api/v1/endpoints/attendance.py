@@ -236,14 +236,14 @@ def finger_touch(_: TokenData = Depends(require_any)):
     _log.info("FINGER-TOUCH: waiting for finger placement...")
     if not fp.SCANNER_AVAILABLE:
         _log.warning("FINGER-TOUCH: scanner unavailable")
-        return {"touched": False}
+        return {"touched": False, "scanner_available": False}
 
     touched = fp.wait_for_touch(timeout=30.0)
     if touched:
         _log.info("FINGER-TOUCH: finger detected")
     else:
         _log.info("FINGER-TOUCH: timeout — no finger in 30 s")
-    return {"touched": touched}
+    return {"touched": touched, "scanner_available": True}
 
 @router.post("/scan")
 def fingerprint_scan(_: TokenData = Depends(require_any)):

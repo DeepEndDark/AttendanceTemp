@@ -1,3 +1,5 @@
+import os
+import secrets
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,4 +12,38 @@ class Settings(BaseSettings):
     firebase_credentials_path: str = "firebase_credentials.json"
 
 
-settings = Settings()
+def _ensure_secret_key() -> Settings:
+    """
+    On first run, generate a cryptographically random secret key and
+    persist it to .env so it survives restarts. Subsequent runs load
+    it from .env via pydantic-settings.
+    """
+    env_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", ".env")
+    env_path = os.path.normpath(env_path)
+
+    s = Settings()
+    if s.secret_key == "dev-secret-key-replace-in-production":
+        new_key = secrets.token_hex(32)
+        # Write / update .env
+        lines = []
+        found = False
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                lines = f.readlines()
+        new_lines = []
+        for line in lines:
+            if line.startswith("SECRET_KEY="):
+                new_lines.append(f"SECRET_KEY={new_key}\n")
+                found = True
+            else:
+                new_lines.append(line)
+        if not found:
+            new_lines.append(f"SECRET_KEY={new_key}\n")
+        with open(env_path, "w") as f:
+            f.writelines(new_lines)
+        # Return fresh settings with the new key
+        return Settings()
+    return s
+
+
+settings = _ensure_secret_key()

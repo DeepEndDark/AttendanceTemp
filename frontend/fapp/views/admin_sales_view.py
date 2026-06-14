@@ -8,7 +8,7 @@ from fapp.views.admin_attendance_view import _CalPicker, _make_date_entry
 
 
 class AdminSalesView(tk.Frame):
-    def __init__(self, master, display_queue=None):
+    def __init__(self, master, display_queue=None, **kwargs):
         super().__init__(master, bg="white")
 
         self._selected_uid: int | None = None
@@ -68,7 +68,7 @@ class AdminSalesView(tk.Frame):
             bar,
             text="New Sale",
             command=self._open_sale,
-            bg="#185FA5",
+            bg="#E8500A",
             fg="white",
             relief="flat",
             padx=10
@@ -201,7 +201,7 @@ class AdminSalesView(tk.Frame):
         self._tree.grid(row=0, column=0, sticky="nsew")
         sb.grid(row=0, column=1, sticky="ns")
 
-        self._tree.tag_configure("open", foreground="#185FA5")
+        self._tree.tag_configure("open", foreground="#E8500A")
         self._tree.tag_configure("date_group", background="#F1EFE8")
         self._tree.bind("<<TreeviewSelect>>", self._on_select)
         self._tree.bind("<ButtonRelease-1>", self._on_click)
@@ -490,6 +490,13 @@ class AdminSalesView(tk.Frame):
             for s in sales
             if s.get("sales_uid") is not None
         }
+
+        # Reset sort arrows so they match the new filter result
+        self._sort_col = None
+        self._sort_asc = True
+        for c, lbl in {"date": "Date", "client": "Client",
+                       "status": "Status", "total": "Total ₱"}.items():
+            self._tree.heading(c, text=lbl)
 
         self._apply_filter()
         self._set_loading(False)
@@ -1132,6 +1139,7 @@ class AdminSalesView(tk.Frame):
 
     def _refresh_preserve_worker(self, uid: int | None):
         try:
+            # Items rarely change — use cache to avoid extra read on every mutation
             items = api.list_items()
             exact = self._date_exact.get().strip() or None
             dfrom = self._date_from.get().strip() or None
@@ -1139,7 +1147,6 @@ class AdminSalesView(tk.Frame):
             sales = api.list_all_sales(date_exact=exact,
                                        date_from=dfrom,
                                        date_to=dto)
-
             self.after(
                 0,
                 lambda: self._refresh_complete(items, sales, uid)

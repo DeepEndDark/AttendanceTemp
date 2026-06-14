@@ -74,7 +74,7 @@ class _CalPicker(tk.Toplevel):
                           self._year == self._sel.year and
                           self._month == self._sel.month)
                 b.config(text=str(day), state="normal",
-                         bg="#185FA5" if is_sel else "SystemButtonFace",
+                         bg="#E8500A" if is_sel else "SystemButtonFace",
                          fg="white"  if is_sel else "black")
                 b._day = day  # type: ignore[attr-defined]
 
@@ -214,7 +214,7 @@ class AdminAttendanceView(tk.Frame):
 
         self._checked: set[str] = set()   # iids of checked log rows
 
-        self._tree.tag_configure("date_group", background="#E6F1FB")
+        self._tree.tag_configure("date_group", background="#FFF0E8")
         self._tree.tag_configure("still_in",   foreground="#1a8040")
 
         self._tree.bind("<ButtonRelease-1>", self._on_click)
@@ -232,7 +232,7 @@ class AdminAttendanceView(tk.Frame):
                           padx=16, pady=6)
 
         self._sort_col: str | None = None
-        self._sort_asc = False
+        self._sort_asc = True
 
         self.refresh()
 
@@ -305,6 +305,18 @@ class AdminAttendanceView(tk.Frame):
         self._populate(logs)
         self._set_loading(False)
 
+    def _refresh_client_cb(self):
+        """Refresh client dropdown live before time-in/out actions."""
+        def _worker():
+            try:
+                clients_list = api.list_clients()
+                names = [c["client_name"] for c in clients_list]
+                self.after(0, lambda: self._client_cb.config(
+                    values=[""] + names))
+            except Exception:
+                pass
+        self._run_worker(_worker, "att-cb-refresh")
+
     # ---------------------------------------------------------
     # Filter
     # ---------------------------------------------------------
@@ -338,6 +350,12 @@ class AdminAttendanceView(tk.Frame):
 
     def _filter_complete(self, logs: list[dict]):
         self._all_logs = logs
+        # Reset sort state so arrows match the new data order
+        self._sort_col = None
+        self._sort_asc = True
+        for c, lbl in {"date": "Date", "client": "Client",
+                       "time_in": "Time In", "time_out": "Time Out"}.items():
+            self._tree.heading(c, text=lbl)
         self._populate(logs)
         self._status.config(text=f"{len(logs)} record(s) — filtered")
         self._set_loading(False)
@@ -475,9 +493,9 @@ class AdminAttendanceView(tk.Frame):
 
     def _toggle_all(self):
         all_rows = [
-            iid for iid in self._tree.get_children("")
-            for iid in ([iid] + list(self._tree.get_children(iid)))
-            if not iid.startswith("d_")
+            child
+            for diid in self._tree.get_children("")
+            for child in self._tree.get_children(diid)
         ]
         if all_rows and all(r in self._checked for r in all_rows):
             # uncheck all
@@ -564,8 +582,12 @@ class AdminAttendanceView(tk.Frame):
     def _after_delete(self, msg: str):
         self._status.config(text=msg)
         self._set_loading(False)
-        # Re-run current filter
-        self._filter()
+        # If any filter is active re-run it, otherwise fall back to today
+        if (self._client_var.get() or self._date_exact.get()
+                or self._date_from.get() or self._date_to.get()):
+            self._filter()
+        else:
+            self.refresh()
 
     # ---------------------------------------------------------
     # Time-In / Time-Out
@@ -578,6 +600,7 @@ class AdminAttendanceView(tk.Frame):
         if not name:
             messagebox.showwarning("Select", "Select a client first.")
             return
+        self._refresh_client_cb()
         if self._queue:
             self._queue.put({"type": "clear"})
         self._set_loading(True, f"Timing in {name}...")
@@ -589,7 +612,7 @@ class AdminAttendanceView(tk.Frame):
             self.after(0, lambda: self._after_time_in(name, log))
         except APIError as e:
             err = e
-            self.after(0, lambda: self._time_in_error(name, err))
+            self.after(0, lambda e=err: self._time_in_error(name, e))
         except Exception as e:
             msg = str(e)
             self.after(0, lambda msg=msg: self._show_error(msg))
@@ -623,6 +646,7 @@ class AdminAttendanceView(tk.Frame):
         if not name:
             messagebox.showwarning("Select", "Select a client first.")
             return
+        self._refresh_client_cb()
         self._set_loading(True, f"Timing out {name}...")
         self._run_worker(lambda: self._time_out_worker(name), "att-time-out")
 

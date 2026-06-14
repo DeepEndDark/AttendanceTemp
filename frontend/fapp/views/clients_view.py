@@ -34,7 +34,7 @@ class ClientsView(tk.Frame):
                   bg="#0F6E56", fg="white",
                   relief="flat", padx=10).pack(side="right", padx=4)
         tk.Button(bar, text="Enroll New", command=self._enroll,
-                  bg="#185FA5", fg="white",
+                  bg="#E8500A", fg="white",
                   relief="flat", padx=10).pack(side="right", padx=4)
 
         cols = ("uid", "name", "status", "days", "trainer", "locker", "expires")
@@ -109,7 +109,15 @@ class ClientsView(tk.Frame):
         for c in clients:
             days    = c["client_days_remaining"]
             expires = (c.get("last_plan_expires_at") or "")[:10]
-            locker  = str(c["locker_number"]) if c.get("locker_number") else "—"
+            lockers = c.get("lockers", [])
+            if not lockers and c.get("locker_number"):
+                lockers = [{"locker_number": c["locker_number"]}]
+            if len(lockers) > 1:
+                locker = f"#{lockers[0]['locker_number']}+{len(lockers)-1}"
+            elif lockers:
+                locker = str(lockers[0]["locker_number"])
+            else:
+                locker = "—"
             trainer = c["client_trainer_days_remaining"]
             tag = ("expired" if days == 0
                    else "warn" if days <= 2
@@ -122,13 +130,15 @@ class ClientsView(tk.Frame):
                 locker, expires,
             ))
         self._status_lbl.config(text=f"{len(clients)} client(s)", fg="gray")
-        # Restore selection without re-triggering a full detail reload
-        if sel_name:
-            for iid in self._tree.get_children():
-                if self._tree.item(iid)["values"][1] == sel_name:
-                    self._tree.selection_set(iid)
-                    self._tree.see(iid)
-                    break
+        # Build name→iid map for O(1) selection restore
+        name_to_iid = {
+            self._tree.item(iid)["values"][1]: iid
+            for iid in self._tree.get_children()
+        }
+        if sel_name and sel_name in name_to_iid:
+            iid = name_to_iid[sel_name]
+            self._tree.selection_set(iid)
+            self._tree.see(iid)
 
     # ---------------------------------------------------------
     # Selection
@@ -319,12 +329,12 @@ class _ClientDetailPanel(tk.Frame):
 
     def _build(self):
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(3, weight=1)
         self.rowconfigure(4, weight=1)
+        self.rowconfigure(5, weight=1)
 
         # Loading indicator
         self._loading_lbl = tk.Label(
-            self, text="", fg="#185FA5", bg="white", font=("", 9))
+            self, text="", fg="#E8500A", bg="white", font=("", 9))
         self._loading_lbl.grid(row=0, column=0, sticky="w", padx=8, pady=2)
 
         # ── Section 1: Identity ──────────────────────────────
@@ -367,8 +377,6 @@ class _ClientDetailPanel(tk.Frame):
         # ── Section 3: Locker ─────────────────────────────────
         s3 = tk.LabelFrame(self, text="Locker",
                            bg="white", padx=8, pady=6)
-        s3.grid(row=2, column=0, sticky="ew", padx=8, pady=4)
-        # Will be placed below s2 via grid management
         s3.grid(row=3, column=0, sticky="ew", padx=8, pady=4)
         self._locker_lbl = tk.Label(s3, text="No locker assigned.",
                                     bg="white", font=("", 9))
@@ -505,11 +513,15 @@ class _ClientDetailPanel(tk.Frame):
                     s["expires_at"][:10],
                 ))
 
-        # Locker
-        if c.get("locker_number"):
-            self._locker_lbl.config(
-                text=f"Locker #{c['locker_number']}  |  "
-                     f"{c['client_locker_days_remaining']} day(s) remaining")
+        # Locker(s)
+        lockers = c.get("lockers", [])
+        if not lockers and c.get("locker_number"):
+            lockers = [{"locker_number": c["locker_number"],
+                        "days_remaining": c.get("client_locker_days_remaining", 0)}]
+        if lockers:
+            lines = [f"#{l['locker_number']} — {l.get('days_remaining', 0)} day(s)"
+                     for l in lockers]
+            self._locker_lbl.config(text="  |  ".join(lines))
         else:
             self._locker_lbl.config(text="No locker assigned.")
 
@@ -625,7 +637,7 @@ class _EnrollDialog(tk.Toplevel):
 
         tk.Label(self._phase1, text="New Client",
                  font=("", 12, "bold"), bg="white",
-                 fg="#185FA5").grid(row=0, column=0, columnspan=2,
+                 fg="#E8500A").grid(row=0, column=0, columnspan=2,
                                     sticky="w", pady=(0, 12))
 
         fields = [("Client name *", "_name"),
@@ -661,7 +673,7 @@ class _EnrollDialog(tk.Toplevel):
                   bg="#f0f0f0").pack(side="right", padx=(6, 0))
         tk.Button(btn_row, text="Enroll", command=self._save,
                   relief="flat", padx=12, pady=6,
-                  bg="#185FA5", fg="white").pack(side="right")
+                  bg="#E8500A", fg="white").pack(side="right")
         self._entries["_name"].focus_set()
 
     def _save(self):
@@ -710,7 +722,7 @@ class _EnrollDialog(tk.Toplevel):
                  justify="left").pack(anchor="w", pady=(4, 14))
 
         self._fp_status = tk.Label(self._phase2, text="", bg="white",
-                                   font=("", 9), fg="#185FA5", wraplength=280)
+                                   font=("", 9), fg="#E8500A", wraplength=280)
         self._fp_status.pack(anchor="w", pady=(0, 10))
 
         btn_row = tk.Frame(self._phase2, bg="white")
@@ -719,7 +731,7 @@ class _EnrollDialog(tk.Toplevel):
             btn_row, text="Scan Fingerprint",
             command=lambda: self._start_fp(name),
             relief="flat", padx=12, pady=6,
-            bg="#5B5AEF", fg="white")
+            bg="#E8500A", fg="white")
         self._fp_btn.pack(side="left", padx=(0, 8))
         self._done_btn = tk.Button(
             btn_row, text="Done", command=self.destroy,
@@ -729,7 +741,7 @@ class _EnrollDialog(tk.Toplevel):
     def _start_fp(self, name: str):
         self._fp_btn.config(state="disabled", text="Scanning...")
         self._fp_status.config(text="Place finger on scanner 3 times...",
-                               fg="#185FA5")
+                               fg="#E8500A")
         self._check_fp_progress()
         threading.Thread(target=self._fp_worker,
                          args=(name,), daemon=True).start()
@@ -757,9 +769,15 @@ class _EnrollDialog(tk.Toplevel):
 
     def _apply_fp_progress(self, n: int):
         try:
+            if n == -1:
+                self._fp_status.config(
+                    text="Enrollment failed — scanner error. Try again.",
+                    fg="red")
+                self._fp_btn.config(state="normal", text="Try Again")
+                return
             self._fp_status.config(
                 text=f"Scan {n}/3 — lift finger, scan again...",
-                fg="#185FA5")
+                fg="#E8500A")
         except Exception:
             pass
         self._maybe_continue_fp_poll()
@@ -774,7 +792,7 @@ class _EnrollDialog(tk.Toplevel):
     def _fp_done_ok(self):
         self._fp_status.config(text="Fingerprint enrolled.", fg="#0F6E56")
         self._fp_btn.pack_forget()
-        self._done_btn.config(bg="#185FA5", fg="white", text="Done")
+        self._done_btn.config(bg="#E8500A", fg="white", text="Done")
 
     def _fp_done_err(self, msg: str):
         self._fp_status.config(text=f"Failed: {msg}", fg="red")
@@ -796,7 +814,7 @@ class _EditDialog(tk.Toplevel):
 
         tk.Label(frame, text=f"Edit: {client['client_name']}",
                  font=("", 11, "bold"), bg="white",
-                 fg="#185FA5").grid(row=0, column=0, columnspan=2,
+                 fg="#E8500A").grid(row=0, column=0, columnspan=2,
                                     sticky="w", pady=(0, 12))
 
         fields = [("Contact number:", "contact_number"),
@@ -822,14 +840,14 @@ class _EditDialog(tk.Toplevel):
             row=4, column=0, columnspan=2, sticky="w")
 
         self._fp_status = tk.Label(frame, text="", bg="white",
-                                   fg="#185FA5", font=("", 9), wraplength=260)
+                                   fg="#E8500A", font=("", 9), wraplength=260)
         self._fp_status.grid(row=5, column=0, columnspan=2,
                              sticky="w", pady=(2, 0))
 
         self._fp_btn = tk.Button(frame, text="Re-scan Fingerprint",
                                  command=self._start_fp,
                                  relief="flat", padx=10, pady=4,
-                                 bg="#5B5AEF", fg="white")
+                                 bg="#E8500A", fg="white")
         self._fp_btn.grid(row=6, column=0, columnspan=2,
                           sticky="w", pady=(6, 0))
 
@@ -840,12 +858,12 @@ class _EditDialog(tk.Toplevel):
                   bg="#f0f0f0").pack(side="right", padx=(6, 0))
         tk.Button(btn_row, text="Save", command=self._save,
                   relief="flat", padx=12, pady=6,
-                  bg="#185FA5", fg="white").pack(side="right")
+                  bg="#E8500A", fg="white").pack(side="right")
         self.wait_window()
 
     def _start_fp(self):
         self._fp_btn.config(state="disabled", text="Scanning...")
-        self._fp_status.config(text="Place finger 3 times...", fg="#185FA5")
+        self._fp_status.config(text="Place finger 3 times...", fg="#E8500A")
         self._check_fp_progress()
         threading.Thread(target=self._fp_worker, daemon=True).start()
 
@@ -883,9 +901,15 @@ class _EditDialog(tk.Toplevel):
 
     def _apply_fp_progress(self, n: int):
         try:
+            if n == -1:
+                self._fp_status.config(
+                    text="Enrollment failed — scanner error. Try again.",
+                    fg="red")
+                self._fp_btn.config(state="normal", text="Try Again")
+                return
             self._fp_status.config(
                 text=f"Scan {n}/3 — lift finger, scan again...",
-                fg="#185FA5")
+                fg="#E8500A")
         except Exception:
             pass
         self._maybe_continue_fp_poll()

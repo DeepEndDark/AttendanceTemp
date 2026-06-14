@@ -39,8 +39,9 @@ class ClientRead(BaseModel):
     client_current_sale_uid: int | None = None
     client_days_remaining: int
     client_trainer_days_remaining: int
-    client_locker_days_remaining: int
-    locker_number: int | None
+    client_locker_days_remaining: int          # total across all lockers (legacy compat)
+    locker_number: int | None                  # primary locker (legacy compat)
+    lockers: list[dict] = []                   # [{locker_number, days_remaining, expires_at}]
     created_at: str | None
     last_enrolled_at: str | None
     last_plan_expires_at: str | None

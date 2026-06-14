@@ -22,7 +22,7 @@ from reportlab.platypus import (
 
 
 def _header_color():
-    return colors.HexColor("#185FA5")
+    return colors.HexColor("#E8500A")
 
 
 def _build_pdf(title: str, subtitle: str, client_purchases: list[dict]) -> bytes:
@@ -65,13 +65,20 @@ def _build_pdf(title: str, subtitle: str, client_purchases: list[dict]) -> bytes
     elements.append(Paragraph(subtitle, styles["Normal"]))
     elements.append(Spacer(1, 0.4*cm))
 
+    # ── Shared paragraph styles — safe against duplicate registration ─
+    def _style(name, **kw):
+        try:
+            return styles[name]
+        except KeyError:
+            return ParagraphStyle(name, parent=styles["Normal"], **kw)
+
+    sec_style = _style("TigerSectionHdr",
+                       fontSize=11, textColor=_header_color(), spaceAfter=4)
+
     # ── Items sold summary ───────────────────────────────────
     if item_totals:
         elements.append(Paragraph(
-            "<b>ITEMS SOLD</b>",
-            ParagraphStyle("SectionHdr", parent=styles["Normal"],
-                           fontSize=11, textColor=_header_color(),
-                           spaceAfter=4)))
+            "<b>ITEMS SOLD</b>", sec_style))
         elements.append(Spacer(1, 0.1*cm))
 
         hdr = [
@@ -116,10 +123,7 @@ def _build_pdf(title: str, subtitle: str, client_purchases: list[dict]) -> bytes
     # ── Subscription plans sold summary ──────────────────────
     if subscription_totals:
         elements.append(Paragraph(
-            "<b>SUBSCRIPTION PLANS SOLD</b>",
-            ParagraphStyle("SectionHdr2", parent=styles["Normal"],
-                           fontSize=11, textColor=_header_color(),
-                           spaceAfter=4)))
+            "<b>SUBSCRIPTION PLANS SOLD</b>", sec_style))
         elements.append(Spacer(1, 0.1*cm))
 
         hdr = [
@@ -162,15 +166,17 @@ def _build_pdf(title: str, subtitle: str, client_purchases: list[dict]) -> bytes
         elements.append(Spacer(1, 0.5*cm))
 
     # ── Per-client breakdown ──────────────────────────────────
-    elements.append(Paragraph(
-        "<b>SALES BREAKDOWN BY CLIENT</b>",
-        ParagraphStyle("SectionHdr3", parent=styles["Normal"],
-                       fontSize=11, textColor=_header_color(),
-                       spaceAfter=4)))
-    elements.append(Spacer(1, 0.2*cm))
+    if client_purchases:
+        elements.append(Paragraph(
+            "<b>SALES BREAKDOWN BY CLIENT</b>", sec_style))
+        elements.append(Spacer(1, 0.2*cm))
 
     grand_total = 0.0
 
+    if not client_purchases:
+        elements.append(Paragraph(
+            "No sales recorded for this period.", styles["Normal"]))
+    
     for purchase in sorted(client_purchases, key=lambda x: x["client_name"]):
         elements.append(Spacer(1, 0.2*cm))
 
@@ -222,7 +228,7 @@ def _build_pdf(title: str, subtitle: str, client_purchases: list[dict]) -> bytes
             ("BOTTOMPADDING",(0, 0), (-1, 0), 5),
 
             # Column header row
-            ("BACKGROUND",   (0, 1), (-1, 1), colors.HexColor("#dce8f5")),
+            ("BACKGROUND",   (0, 1), (-1, 1), colors.HexColor("#FFE4D4")),
             ("FONTSIZE",     (0, 1), (-1, 1), 9),
 
             # Item rows — alternating
@@ -255,7 +261,7 @@ def _build_pdf(title: str, subtitle: str, client_purchases: list[dict]) -> bytes
     )
     gt.setStyle(TableStyle([
         ("ALIGN",         (1, 0), (1, 0), "RIGHT"),
-        ("BACKGROUND",    (0, 0), (-1, -1), colors.HexColor("#E6F1FB")),
+        ("BACKGROUND",    (0, 0), (-1, -1), colors.HexColor("#FFF0E8")),
         ("FONTSIZE",      (0, 0), (-1, -1), 11),
         ("TOPPADDING",    (0, 0), (-1, -1), 6),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 6),

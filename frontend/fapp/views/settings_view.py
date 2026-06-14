@@ -4,7 +4,7 @@ from fapp.api_client import api, APIError
 
 
 class SettingsView(tk.Frame):
-    def __init__(self, master, display_queue=None):
+    def __init__(self, master, display_queue=None, **kwargs):
         super().__init__(master, bg="white")
         self._build()
 
@@ -40,7 +40,7 @@ class SettingsView(tk.Frame):
 
         tk.Button(locker_frame, text="Save Locker Settings",
                   command=self._save_locker,
-                  bg="#185FA5", fg="white",
+                  bg="#E8500A", fg="white",
                   relief="flat", padx=12,
                   pady=6).grid(row=len(fields), column=0,
                                columnspan=2, sticky="w",
@@ -69,7 +69,7 @@ class SettingsView(tk.Frame):
 
         tk.Button(trainer_frame, text="Save Trainer Setting",
                   command=self._save_trainer,
-                  bg="#185FA5", fg="white",
+                  bg="#E8500A", fg="white",
                   relief="flat", padx=12,
                   pady=6).grid(sticky="w", pady=(10, 0))
 

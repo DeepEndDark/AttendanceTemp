@@ -63,7 +63,7 @@ class EnrollView(tk.Frame):
                           padx=(8, 0), pady=5)
         self._sub_cb.bind("<<ComboboxSelected>>", self._show_sub_detail)
 
-        self._sub_detail = tk.Label(pane, text="", fg="#185FA5",
+        self._sub_detail = tk.Label(pane, text="", fg="#E8500A",
                                     bg="white", font=("", 9),
                                     wraplength=260, justify="left")
         self._sub_detail.grid(row=4, column=0, columnspan=2,
@@ -73,14 +73,14 @@ class EnrollView(tk.Frame):
         btn_row.grid(row=5, column=0, columnspan=2, pady=(4, 0))
         tk.Button(btn_row, text="Enroll New",
                   command=self._enroll_new,
-                  bg="#185FA5", fg="white",
+                  bg="#E8500A", fg="white",
                   relief="flat", padx=12, pady=6).pack(side="left", padx=4)
         tk.Button(btn_row, text="Re-enroll",
                   command=self._re_enroll,
                   bg="#0F6E56", fg="white",
                   relief="flat", padx=12, pady=6).pack(side="left", padx=4)
 
-        self._enroll_status = tk.Label(pane, text="", fg="#185FA5",
+        self._enroll_status = tk.Label(pane, text="", fg="#E8500A",
                                        bg="white", wraplength=280,
                                        font=("", 9))
         self._enroll_status.grid(row=6, column=0, columnspan=2,
@@ -93,7 +93,7 @@ class EnrollView(tk.Frame):
         self._fp_btn = tk.Button(self._fp_frame,
                                  text="Enroll Fingerprint Now",
                                  command=self._enroll_fp,
-                                 bg="#5B5AEF", fg="white",
+                                 bg="#E8500A", fg="white",
                                  relief="flat", padx=10, pady=4)
         self._fp_btn.pack(side="left", padx=(0, 8))
         tk.Button(self._fp_frame, text="Skip",
@@ -210,8 +210,13 @@ class EnrollView(tk.Frame):
             if names:
                 self._sub_cb.current(0)
                 self._show_sub_detail()
-        except APIError:
-            pass
+            else:
+                self._enroll_status.config(
+                    text="No subscription plans found. Add plans first.",
+                    fg="orange")
+        except APIError as e:
+            self._enroll_status.config(text=f"Error loading plans: {e}",
+                                       fg="red")
 
     def _show_sub_detail(self, _=None):
         name = self._sub_var.get()
@@ -242,8 +247,9 @@ class EnrollView(tk.Frame):
                     expires,
                     c["client_days_remaining"],
                 ))
-        except APIError:
-            pass
+        except APIError as e:
+            self._att_status.config(text=f"Error loading clients: {e}",
+                                    fg="red")
         self._recent.tag_configure("warn", foreground="#BA7517")
 
     def _load_clients(self):
@@ -303,7 +309,7 @@ class EnrollView(tk.Frame):
             self._fp_frame.grid()
             self._fp_btn.config(state="normal",
                                 text="Enroll Fingerprint Now",
-                                bg="#5B5AEF")
+                                bg="#E8500A")
             self._load_recent()
             self._load_clients()
             if self._queue:
@@ -316,26 +322,39 @@ class EnrollView(tk.Frame):
             self._enroll_status.config(text=str(e), fg="red")
 
     def _re_enroll(self):
+        # Reset any pending FP state from a previous enrollment
+        self._fp_frame.grid_remove()
+        self._pending_fp_name = None
+        self._fp_btn.config(state="normal", text="Enroll Fingerprint Now")
+
         name = self._entries["_name"].get().strip()
-        sub = self._sub_var.get()
+        sub  = self._sub_var.get()
         if not name or not sub:
             self._enroll_status.config(
                 text="Client name and subscription required.", fg="red")
             return
-        try:
-            resp = api.re_enroll_client(name, sub)
-            if resp.get("warning"):
-                if not messagebox.askyesno("Warning", resp["warning"] +
-                                           "\n\nProceed?"):
-                    return
-            expires = (resp["client"].get("last_plan_expires_at") or "")[:10]
-            self._enroll_status.config(
-                text=f"Re-enrolled '{name}' — {sub} | Expires: {expires}",
-                fg="#0F6E56")
-            self._entries["_name"].delete(0, "end")
-            self._load_recent()
-        except APIError as e:
-            self._enroll_status.config(text=str(e), fg="red")
+
+        self._enroll_status.config(text="Re-enrolling...", fg="#E8500A")
+        import threading
+        def _worker():
+            try:
+                resp = api.re_enroll_client(name, sub)
+                self.after(0, lambda: self._re_enroll_done(name, sub, resp))
+            except APIError as e:
+                msg = str(e)
+                self.after(0, lambda msg=msg: self._enroll_status.config(
+                    text=msg, fg="red"))
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _re_enroll_done(self, name: str, sub: str, resp: dict):
+        expires = (resp["client"].get("last_plan_expires_at") or "")[:10]
+        self._enroll_status.config(
+            text=f"Re-enrolled '{name}' — {sub} | Expires: {expires}",
+            fg="#0F6E56")
+        if resp.get("warning"):
+            messagebox.showinfo("Note", resp["warning"])
+        self._entries["_name"].delete(0, "end")
+        self._load_recent()
 
     def _enroll_fp(self):
         name = getattr(self, "_pending_fp_name", None) \
@@ -347,7 +366,7 @@ class EnrollView(tk.Frame):
         self._fp_btn.config(state="disabled", text="Scanning...")
         self._enroll_status.config(
             text=f"Place finger on scanner 3 times for '{name}'...",
-            fg="#185FA5")
+            fg="#E8500A")
         import threading
         self._poll_fp_progress()   # start polling on main thread before worker starts
         threading.Thread(target=self._enroll_fp_worker,
@@ -374,28 +393,29 @@ class EnrollView(tk.Frame):
     def _fetch_progress(self):
         """Background thread: fetch progress, post result to main thread."""
         try:
-            import requests as _req
-            from fapp.api_client import BASE_URL, api
-            r = _req.get(
-                f"{BASE_URL}/clients/enroll-fingerprint/progress",
-                headers={"Authorization": f"Bearer {api._token}"},
-                timeout=2,
-            )
-            if r.status_code == 200:
-                n = r.json().get("progress", 0)
-                self.after(0, lambda: self._apply_progress(n))
-                return
+            n = api.get_enroll_progress().get("progress", 0)
+            self.after(0, lambda: self._apply_progress(n))
+            return
         except Exception:
             pass
         # On error, keep polling if button still disabled
         self.after(0, self._maybe_continue_poll)
 
     def _apply_progress(self, n: int):
-        """Called on main thread with latest progress value."""
+        """Called on main thread with latest progress value. -1 = failed."""
+        if n == -1:
+            try:
+                self._enroll_status.config(
+                    text="Enrollment failed — scanner error. Try again.",
+                    fg="red")
+                self._fp_btn.config(state="normal", text="Try Again")
+            except Exception:
+                pass
+            return
         if n > 0:
             self._enroll_status.config(
                 text=f"Scan {n}/3 captured \u2014 lift finger, place again...",
-                fg="#185FA5")
+                fg="#E8500A")
             self._fp_btn.config(text=f"Scanning... ({n}/3)")
         elif n == -1:
             return  # error handled by _fp_error
@@ -482,15 +502,24 @@ class EnrollView(tk.Frame):
         if not name:
             messagebox.showwarning("Select", "Select a client first.")
             return
-        try:
-            result = api.rent_locker(name)
-            messagebox.showinfo("Locker Rented",
-                                f"Locker #{result['locker_number']} assigned to {name}\n"
-                                f"Days: {result['days_added']}  |  "
-                                f"Expires: {result['expires_at']}")
-            self._load_clients()
-        except APIError as e:
-            messagebox.showerror("Error", str(e))
+        import threading
+        def _worker():
+            try:
+                result = api.rent_locker(name)
+                self.after(0, lambda: self._rent_locker_done(name, result))
+            except APIError as e:
+                msg = str(e)
+                self.after(0, lambda msg=msg: messagebox.showerror(
+                    "Error", msg))
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _rent_locker_done(self, name: str, result: dict):
+        messagebox.showinfo(
+            "Locker Rented",
+            f"Locker #{result['locker_number']} assigned to {name}\n"
+            f"Days: {result['days_added']}  |  "
+            f"Expires: {result['expires_at']}")
+        self._load_clients()
 
     def refresh(self):
         self._load_subs()
