@@ -1,8 +1,9 @@
+import csv
 import os
 import sys
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 from datetime import date
 
 from fapp.api_client import api, APIError
@@ -25,11 +26,32 @@ def set_window_icon(window):
     this explicitly on every dialog avoids relying on that inheritance
     and keeps behavior consistent (e.g. when a dialog is later detached
     or shown before its parent has finished initializing).
+
+    Sets both iconbitmap (.ico) and iconphoto (PNG via PIL) — iconbitmap
+    alone is unreliable for the title bar / Alt-Tab thumbnail on Windows
+    when called before the window has a fully realized HWND.
     """
     try:
         icon_path = _icon_resource_path("assets/tgym.ico")
-        if os.path.exists(icon_path):
+        if not os.path.exists(icon_path):
+            return
+
+        window.update_idletasks()
+
+        try:
             window.iconbitmap(default=icon_path)
+        except Exception as e:
+            print(f"Window iconbitmap failed: {e}")
+
+        try:
+            from PIL import Image, ImageTk
+            img = Image.open(icon_path)
+            # Keep a reference on the window itself so it isn't GC'd
+            window._icon_photo_ref = ImageTk.PhotoImage(img)
+            window.iconphoto(False, window._icon_photo_ref)
+        except Exception as e:
+            print(f"Window iconphoto fallback failed: {e}")
+
     except Exception as e:
         print(f"Window icon load failed: {e}")
 
@@ -240,6 +262,12 @@ class AdminAttendanceView(tk.Frame):
                  font=("", 14, "bold"), bg="white").pack(side="left")
         tk.Button(bar, text="Refresh", command=self.refresh,
                   relief="flat", padx=10).pack(side="right", padx=4)
+
+        self._export_btn = tk.Button(bar, text="Export ▾",
+                                     command=self._show_export_menu,
+                                     relief="flat", padx=10)
+        self._export_btn.pack(side="right", padx=4)
+
         tk.Button(bar, text="Delete Log", command=self._delete_log,
                   bg="#8B1E1E", fg="white",
                   relief="flat", padx=10).pack(side="right", padx=4)
@@ -409,19 +437,26 @@ class AdminAttendanceView(tk.Frame):
         self._apply_plan_filter()
         self._set_loading(False)
 
-    def _apply_plan_filter(self):
-        """Filter the currently loaded logs to clients on the selected plan."""
+    def _get_visible_logs(self) -> list[dict]:
+        """
+        Returns the logs currently shown on screen — after the date/client
+        filter (already applied server-side into self._all_logs) and the
+        plan filter (applied client-side). Used by both _populate and export
+        so the two never disagree about what "visible" means.
+        """
         plan = self._plan_filter_var.get()
         if plan and plan != "All Plans":
             matching_names = {
                 c["client_name"] for c in self._all_clients
                 if plan in (c.get("active_subscription_names") or [])
             }
-            visible = [l for l in self._all_logs
-                      if l["client_name"] in matching_names]
-        else:
-            visible = self._all_logs
-        self._populate(visible)
+            return [l for l in self._all_logs
+                   if l["client_name"] in matching_names]
+        return self._all_logs
+
+    def _apply_plan_filter(self):
+        """Filter the currently loaded logs to clients on the selected plan."""
+        self._populate(self._get_visible_logs())
 
     def _refresh_client_cb(self):
         """Refresh client dropdown live before time-in/out actions."""
@@ -663,6 +698,143 @@ class AdminAttendanceView(tk.Frame):
             except ValueError:
                 pass
         return uids
+
+    # ---------------------------------------------------------
+    # Export (CSV / PDF) — scoped to whatever is currently filtered/visible
+    # ---------------------------------------------------------
+
+    def _show_export_menu(self):
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Export as CSV…", command=self._export_csv)
+        menu.add_command(label="Export as PDF…", command=self._export_pdf)
+        x = self._export_btn.winfo_rootx()
+        y = self._export_btn.winfo_rooty() + self._export_btn.winfo_height()
+        try:
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
+
+    def _export_csv(self):
+        logs = self._get_visible_logs()
+        if not logs:
+            messagebox.showinfo("Nothing to export", "No attendance logs are currently visible.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+            initialfile=f"attendance_{date.today().isoformat()}.csv",
+            title="Export Attendance Logs as CSV")
+        if not path:
+            return
+        try:
+            rows = self._sorted_export_rows(logs)
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["Date", "Client", "Time In", "Time Out",
+                                 "Days Remaining", "Expiry Warning"])
+                for log in rows:
+                    writer.writerow([
+                        log.get("log_date", ""),
+                        log.get("client_name", ""),
+                        log.get("time_in", ""),
+                        log.get("time_out") or "",
+                        log.get("days_remaining", ""),
+                        "Yes" if log.get("expiry_warning") else "",
+                    ])
+            messagebox.showinfo("Exported", f"Saved to:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Export failed", str(e))
+
+    def _export_pdf(self):
+        logs = self._get_visible_logs()
+        if not logs:
+            messagebox.showinfo("Nothing to export", "No attendance logs are currently visible.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".pdf",
+            filetypes=[("PDF files", "*.pdf")],
+            initialfile=f"attendance_{date.today().isoformat()}.pdf",
+            title="Export Attendance Logs as PDF")
+        if not path:
+            return
+        try:
+            rows = self._sorted_export_rows(logs)
+            pdf_bytes = self._build_attendance_pdf(rows)
+            with open(path, "wb") as f:
+                f.write(pdf_bytes)
+            messagebox.showinfo("Exported", f"Saved to:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Export failed", str(e))
+
+    def _sorted_export_rows(self, logs: list[dict]) -> list[dict]:
+        """Most recent date first, then by time_in descending — matches on-screen order."""
+        return sorted(
+            logs,
+            key=lambda l: (l.get("log_date", ""), l.get("time_in", "") or ""),
+            reverse=True,
+        )
+
+    def _build_attendance_pdf(self, rows: list[dict]) -> bytes:
+        """
+        Builds a simple tabular PDF of the given attendance rows.
+        Kept local to the frontend (rather than round-tripping to the
+        backend) since the rows are already filtered exactly as shown
+        on screen — date range, client, and plan filter all included.
+        """
+        from io import BytesIO
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib.units import cm
+        from reportlab.platypus import (
+            SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        )
+        from reportlab.lib.styles import getSampleStyleSheet
+
+        buf = BytesIO()
+        doc = SimpleDocTemplate(
+            buf, pagesize=landscape(A4),
+            leftMargin=1.5 * cm, rightMargin=1.5 * cm,
+            topMargin=1.5 * cm, bottomMargin=1.5 * cm,
+        )
+        styles = getSampleStyleSheet()
+        elements = [
+            Paragraph("Attendance Logs", styles["Title"]),
+            Paragraph(
+                f"Exported {date.today().strftime('%B %d, %Y')} — "
+                f"{len(rows)} record(s)",
+                styles["Normal"]),
+            Spacer(1, 0.5 * cm),
+        ]
+
+        table_data = [["Date", "Client", "Time In", "Time Out",
+                       "Days Left", "Expiry Warning"]]
+        for log in rows:
+            table_data.append([
+                log.get("log_date", ""),
+                log.get("client_name", ""),
+                log.get("time_in", ""),
+                log.get("time_out") or "—",
+                str(log.get("days_remaining", "")),
+                "Yes" if log.get("expiry_warning") else "",
+            ])
+
+        table = Table(table_data, repeatRows=1)
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8500A")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CCCCCC")),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1),
+             [colors.white, colors.HexColor("#F7F7F7")]),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        elements.append(table)
+
+        doc.build(elements)
+        return buf.getvalue()
 
     # ---------------------------------------------------------
     # Delete log(s)

@@ -1,6 +1,15 @@
 # launch.spec — PyInstaller single-exe build
-# Run from project2 root:
+# Run with:
 #   python -m PyInstaller launch.spec
+#
+# All paths below are anchored to SPECROOT (this file's own directory via
+# PyInstaller's built-in SPECPATH variable), NOT the current working
+# directory the command is invoked from. This matters: if launch.spec is
+# ever run from a different cwd (e.g. from inside frontend/ instead of the
+# repo root), plain relative strings like "assets/tgym.ico" would silently
+# fail to resolve as SOURCE paths during Analysis() — sometimes producing
+# only a buried warning rather than a hard build failure, shipping an exe
+# that's missing the icon/background but otherwise runs fine.
 #
 # Notes:
 # - Keep console=True while debugging frozen EXE startup.
@@ -14,6 +23,15 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
+
+# SPECPATH is injected by PyInstaller into the spec's exec namespace and is
+# always the directory containing this .spec file — independent of cwd.
+SPECROOT = Path(SPECPATH).resolve()
+
+
+def _r(relative_path: str) -> str:
+    """Resolve a path relative to this spec file's directory, as a string."""
+    return str(SPECROOT / relative_path)
 
 
 # ── DigitalPersona SDK paths ──────────────────────────────────
@@ -194,20 +212,20 @@ hidden = (
 # ── Analysis ──────────────────────────────────────────────────
 
 a = Analysis(
-    ["launch.py"],
+    [_r("launch.py")],
     pathex=[
-        ".",
-        "backend",
-        "frontend",
+        str(SPECROOT),
+        _r("backend"),
+        _r("frontend"),
     ],
     binaries=dp_binaries,
     datas=[
-        ("backend/app", "app"),
-        ("backend/main.py", "."),
-        ("frontend/fapp", "fapp"),
-        ("frontend/frontend_main.py", "frontend_main.py"),
-        ("assets/tgym.ico", "assets/tgym.ico"),
-        ("assets/tgymbbg.jpg", "assets/tgymbbg.jpg")
+        (_r("backend/app"), "app"),
+        (_r("backend/main.py"), "."),
+        (_r("frontend/fapp"), "fapp"),
+        (_r("frontend/frontend_main.py"), "frontend_main.py"),
+        (_r("assets/tgym.ico"), "assets/tgym.ico"),
+        (_r("assets/tgymbbg.jpg"), "assets/tgymbbg.jpg"),
     ],
     hiddenimports=hidden,
     hookspath=[],
@@ -238,7 +256,7 @@ exe = EXE(
     a.datas,
     [],
     name="Tiger's Fitness Gym",
-    icon="assets/tgym.ico",
+    icon=_r("assets/tgym.ico"),
     debug=False,
     strip=False,
     upx=False,

@@ -166,23 +166,52 @@ class LoginView(tk.Frame):
 
         self._sign_in_btn.config(state="disabled", text="Signing in…")
         self._status.config(text="")
-        self.update_idletasks()
 
+        # api.login() makes a real blocking HTTP request (up to the full
+        # connect+read timeout if the backend is slow/unreachable). Running
+        # it directly on the main thread freezes the whole window — the
+        # title bar stops responding, nothing redraws — for that entire
+        # duration. Run it in a background thread and marshal the result
+        # back via self.after(), same pattern as the network poller.
+        threading.Thread(
+            target=self._login_worker, args=(u, p), daemon=True
+        ).start()
+
+    def _login_worker(self, u: str, p: str):
         try:
             api.login(u, p)
-            self.on_success()
         except NetworkError:
-            self._network_ok = False
-            self._net_label.config(text="⚠  Lost connection during login — retrying…")
-            self._net_frame.grid()
-            self._status.config(text="Lost connection. Please wait for reconnection.", fg="red")
-            self._sign_in_btn.config(state="disabled", text="Sign In")
+            self.after(0, self._login_network_error)
+            return
         except APIError as e:
-            self._status.config(text=str(e), fg="red")
-            self._sign_in_btn.config(state="normal", text="Sign In")
+            msg = str(e)
+            self.after(0, lambda: self._login_error(msg))
+            return
         except Exception as e:
-            self._status.config(text=f"Unexpected error: {e}", fg="red")
-            self._sign_in_btn.config(state="normal", text="Sign In")
+            msg = f"Unexpected error: {e}"
+            self.after(0, lambda: self._login_error(msg))
+            return
+        self.after(0, self._login_success)
+
+    def _login_success(self):
+        if self._destroyed:
+            return
+        self.on_success()
+
+    def _login_network_error(self):
+        if self._destroyed:
+            return
+        self._network_ok = False
+        self._net_label.config(text="⚠  Lost connection during login — retrying…")
+        self._net_frame.grid()
+        self._status.config(text="Lost connection. Please wait for reconnection.", fg="red")
+        self._sign_in_btn.config(state="disabled", text="Sign In")
+
+    def _login_error(self, msg: str):
+        if self._destroyed:
+            return
+        self._status.config(text=msg, fg="red")
+        self._sign_in_btn.config(state="normal", text="Sign In")
 
     # ── Admin Setup flow ─────────────────────────────────────
 
@@ -210,26 +239,58 @@ class LoginView(tk.Frame):
         err_label = tk.Label(pw_win, text="", fg="red", font=("", 8))
         err_label.pack(pady=(6, 0))
 
+        verify_btn = tk.Button(pw_win, text="Verify", command=lambda: None,
+                  bg="#E8500A", fg="white", relief="flat",
+                  padx=12, pady=6)
+
         def attempt():
             u, p = user_entry.get().strip(), pass_entry.get().strip()
             if not u or not p:
                 err_label.config(text="Both fields are required.")
                 return
-            try:
-                api.local_admin_login(u, p)
-            except NetworkError:
-                err_label.config(text="Cannot reach server.")
-                return
-            except APIError as e:
-                err_label.config(text=str(e))
-                return
-            pw_win.destroy()
-            self._show_admin_setup_panel()
+            verify_btn.config(state="disabled", text="Verifying…")
+            err_label.config(text="")
+            threading.Thread(
+                target=self._local_login_worker,
+                args=(u, p, pw_win, err_label, verify_btn),
+                daemon=True,
+            ).start()
 
+        verify_btn.config(command=attempt)
         pass_entry.bind("<Return>", lambda _e: attempt())
-        tk.Button(pw_win, text="Verify", command=attempt,
-                  bg="#E8500A", fg="white", relief="flat",
-                  padx=12, pady=6).pack(pady=14)
+        verify_btn.pack(pady=14)
+
+    def _local_login_worker(self, u: str, p: str, pw_win, err_label, verify_btn):
+        try:
+            api.local_admin_login(u, p)
+        except NetworkError:
+            self.after(0, lambda: self._local_login_fail(
+                err_label, verify_btn, "Cannot reach server."))
+            return
+        except APIError as e:
+            msg = str(e)
+            self.after(0, lambda: self._local_login_fail(
+                err_label, verify_btn, msg))
+            return
+        self.after(0, lambda: self._local_login_success(pw_win))
+
+    def _local_login_fail(self, err_label, verify_btn, msg: str):
+        if self._destroyed:
+            return
+        try:
+            err_label.config(text=msg)
+            verify_btn.config(state="normal", text="Verify")
+        except tk.TclError:
+            pass  # dialog was closed before the request finished
+
+    def _local_login_success(self, pw_win):
+        if self._destroyed:
+            return
+        try:
+            pw_win.destroy()
+        except tk.TclError:
+            pass
+        self._show_admin_setup_panel()
 
     def _show_admin_setup_panel(self):
         if self._setup_panel is not None:
@@ -280,16 +341,30 @@ class LoginView(tk.Frame):
             self._setup_status.config(text="Please select a file first.", fg="red")
             return
         self._setup_status.config(text="Uploading and verifying…", fg="gray")
-        self.update_idletasks()
+        threading.Thread(
+            target=self._apply_fb_config_worker, args=(path,), daemon=True
+        ).start()
+
+    def _apply_fb_config_worker(self, path: str):
         try:
             api.apply_firebase_config(path)
         except NetworkError:
-            self._setup_status.config(text="Cannot reach server.", fg="red")
+            self.after(0, lambda: self._fb_config_fail("Cannot reach server."))
             return
         except APIError as e:
-            self._setup_status.config(text=str(e), fg="red")
+            msg = str(e)
+            self.after(0, lambda: self._fb_config_fail(msg))
             return
+        self.after(0, self._fb_config_success)
 
+    def _fb_config_fail(self, msg: str):
+        if self._destroyed:
+            return
+        self._setup_status.config(text=msg, fg="red")
+
+    def _fb_config_success(self):
+        if self._destroyed:
+            return
         self._setup_status.config(text="✔ Firebase configured successfully.", fg="#0F6E56")
         self.after(1200, lambda: self._close_admin_setup(refreshed_ok=True))
 

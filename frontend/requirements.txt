@@ -1,5 +1,6 @@
 requests==2.32.3
 pillow==12.2.0
+reportlab==4.4.10
 # tkinter is bundled with Python
 # python-dpfj requires DigitalPersona SDK installed separately on Windows
 # pip install python-dpfj   ← run after SDK is installed

@@ -38,16 +38,39 @@ class ClientDisplayWindow(tk.Toplevel):
         self._banner_job = None
         self._bg_photo = None       # keep a reference so it isn't GC'd
         self._bg_label = None
+        self._icon_photo = None    # keep a reference so it isn't GC'd
         self._set_icon()
         self._build()
         self._tick_clock()
         self._poll_queue()
 
     def _set_icon(self):
+        """
+        Sets both iconbitmap (.ico, title bar) and iconphoto (PNG via PIL,
+        taskbar/Alt-Tab) — iconbitmap alone is unreliable for the taskbar
+        on Windows, especially this early before the Toplevel has a fully
+        realized HWND. update_idletasks() forces realization first.
+        """
         try:
             icon_path = _resource_path("assets/tgym.ico")
-            if os.path.exists(icon_path):
+            if not os.path.exists(icon_path):
+                return
+
+            self.update_idletasks()
+
+            try:
                 self.iconbitmap(default=icon_path)
+            except Exception as e:
+                print(f"Client display iconbitmap failed: {e}")
+
+            if _PIL_AVAILABLE:
+                try:
+                    img = Image.open(icon_path)
+                    self._icon_photo = ImageTk.PhotoImage(img)
+                    self.iconphoto(False, self._icon_photo)  # False: this window only
+                except Exception as e:
+                    print(f"Client display iconphoto fallback failed: {e}")
+
         except Exception as e:
             print(f"Client display icon load failed: {e}")
 

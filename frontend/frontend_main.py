@@ -32,13 +32,7 @@ class App(tk.Tk):
         self.minsize(860, 540)
         self._display_queue: queue.Queue = queue.Queue()
         self._att_queue:     queue.Queue = queue.Queue()
-        try:
-            icon_path = resource_path("assets/tgym.ico")
-            icon_path = os.path.normpath(icon_path)
-            if os.path.exists(icon_path):
-                self.iconbitmap(default=icon_path)
-        except Exception as e:
-            print(f"Window icon load failed: {e}")
+        self._apply_window_icon()
 
         self._client_win: ClientDisplayWindow | None = None
         self._current_view = None
@@ -47,6 +41,44 @@ class App(tk.Tk):
         self._view_classes: dict = {}
         self._scanner_stop = threading.Event()
         self._show_login()
+
+    def _apply_window_icon(self):
+        """
+        Sets both the title-bar icon (iconbitmap, .ico-based) and the
+        taskbar/Alt-Tab icon (iconphoto, PNG-based via PIL).
+
+        These are two separate Windows mechanisms — iconbitmap alone is
+        not reliable for the taskbar entry, especially when called before
+        the window has a fully realized HWND. update_idletasks() forces
+        that realization first, and iconphoto is set as a true fallback/
+        supplement so the taskbar consistently picks up the icon even when
+        iconbitmap's effect is limited to the title bar.
+        """
+        try:
+            icon_path = os.path.normpath(resource_path("assets/tgym.ico"))
+            if not os.path.exists(icon_path):
+                return
+
+            # Force the window to realize its HWND before requesting an
+            # icon change — setting it too early is the main reason this
+            # silently fails to reach the taskbar on Windows.
+            self.update_idletasks()
+
+            try:
+                self.iconbitmap(default=icon_path)
+            except Exception as e:
+                print(f"iconbitmap failed: {e}")
+
+            try:
+                from PIL import Image, ImageTk
+                img = Image.open(icon_path)
+                self._icon_photo = ImageTk.PhotoImage(img)  # keep a reference
+                self.iconphoto(True, self._icon_photo)
+            except Exception as e:
+                print(f"iconphoto fallback failed: {e}")
+
+        except Exception as e:
+            print(f"Window icon load failed: {e}")
 
 
     # ── Login ────────────────────────────────────────────────
