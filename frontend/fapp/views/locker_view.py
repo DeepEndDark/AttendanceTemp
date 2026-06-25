@@ -7,7 +7,9 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 from fapp.api_client import api, APIError
-from fapp.views.admin_attendance_view import make_searchable_combobox
+from fapp.views.admin_attendance_view import (
+    make_searchable_combobox, set_window_icon,
+)
 
 
 COLS = 6   # lockers per row in the grid (reduced — tiles are now larger)
@@ -451,6 +453,7 @@ class _AssignDialog(tk.Toplevel):
         self.title("Assign Locker")
         self.configure(bg="white")
         self.resizable(False, False)
+        set_window_icon(self)
         self.grab_set()
         self.result = None
         self._all_clients = all_clients

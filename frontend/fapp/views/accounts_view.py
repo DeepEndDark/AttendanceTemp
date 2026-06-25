@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 from fapp.api_client import api, APIError
+from fapp.views.admin_attendance_view import set_window_icon
 
 
 class AccountsView(tk.Frame):
@@ -109,6 +110,7 @@ class _AccountDialog(tk.Toplevel):
         super().__init__(parent)
         self.title(title)
         self.resizable(False, False)
+        set_window_icon(self)
         self.grab_set()
         self.result = None
         row = 0

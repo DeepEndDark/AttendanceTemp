@@ -1,9 +1,37 @@
+import os
+import sys
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import date
 
 from fapp.api_client import api, APIError
+
+
+def _icon_resource_path(relative_path: str) -> str:
+    """Resolve assets/... for both dev and PyInstaller builds."""
+    if getattr(sys, "frozen", False):
+        return os.path.join(sys._MEIPASS, relative_path)
+    # This file lives at frontend/fapp/views/ — repo root is 3 levels up.
+    base = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))))
+    return os.path.join(base, relative_path)
+
+
+def set_window_icon(window):
+    """
+    Apply the gym's icon to any Tk/Toplevel window. Toplevels usually
+    inherit their parent's icon automatically on Windows, but calling
+    this explicitly on every dialog avoids relying on that inheritance
+    and keeps behavior consistent (e.g. when a dialog is later detached
+    or shown before its parent has finished initializing).
+    """
+    try:
+        icon_path = _icon_resource_path("assets/tgym.ico")
+        if os.path.exists(icon_path):
+            window.iconbitmap(default=icon_path)
+    except Exception as e:
+        print(f"Window icon load failed: {e}")
 
 
 # ── Minimal inline calendar picker ────────────────────────────
@@ -15,6 +43,7 @@ class _CalPicker(tk.Toplevel):
         super().__init__(parent)
         self.title("Pick Date")
         self.resizable(False, False)
+        set_window_icon(self)
         self.grab_set()
         self.result: date | None = None
 

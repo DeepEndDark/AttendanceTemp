@@ -4,6 +4,7 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 from fapp.api_client import api, APIError
+from fapp.views.admin_attendance_view import set_window_icon
 
 
 class ClientsView(tk.Frame):
@@ -612,6 +613,7 @@ class _AddPlanDialog(tk.Toplevel):
         self.title(f"Add Plan — {client_name}")
         self.configure(bg="white")
         self.resizable(False, False)
+        set_window_icon(self)
         self.grab_set()
         self.result = None
 
@@ -669,6 +671,7 @@ class _EnrollDialog(tk.Toplevel):
         self.title("Enroll New Client")
         self.configure(bg="white")
         self.resizable(False, False)
+        set_window_icon(self)
         self.grab_set()
         self.result = None
         self._subs = subs
@@ -849,6 +852,7 @@ class _EditDialog(tk.Toplevel):
         self.title(f"Edit — {client['client_name']}")
         self.configure(bg="white")
         self.resizable(False, False)
+        set_window_icon(self)
         self.grab_set()
         self.result = None
         self._client_name = client["client_name"]

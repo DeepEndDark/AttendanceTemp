@@ -5,6 +5,7 @@ Shows identity, active subscriptions, locker, attendance history, sales history.
 import tkinter as tk
 from tkinter import ttk, messagebox
 from fapp.api_client import api, APIError
+from fapp.views.admin_attendance_view import set_window_icon
 
 
 class ClientInfoView(tk.Toplevel):
@@ -13,6 +14,7 @@ class ClientInfoView(tk.Toplevel):
         self.title(f"Client: {client_name}")
         self.geometry("860x680")
         self.resizable(True, True)
+        set_window_icon(self)
         self._client_name = client_name
         self._build()
         self._load()

@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 from fapp.api_client import api, APIError
+from fapp.views.admin_attendance_view import set_window_icon
 
 
 class SubscriptionsView(tk.Frame):
@@ -145,6 +146,7 @@ class _SubDialog(tk.Toplevel):
         super().__init__(parent)
         self.title(title)
         self.resizable(False, False)
+        set_window_icon(self)
         self.grab_set()
         self.result = None
         is_edit = data is not None

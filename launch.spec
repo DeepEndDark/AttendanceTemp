@@ -116,6 +116,7 @@ hidden = (
         "app.api.v1.endpoints.sales",
         "app.api.v1.endpoints.lockers",
         "app.api.v1.endpoints.reports",
+        "app.api.v1.endpoints.admin_setup",
         "app.api.v1.router",
         "app.api.dependencies",
 
