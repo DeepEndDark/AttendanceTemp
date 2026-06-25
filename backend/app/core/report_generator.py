@@ -272,18 +272,42 @@ def _build_pdf(title: str, subtitle: str, client_purchases: list[dict]) -> bytes
     return buf.getvalue()
 
 
-def generate_daily_pdf(report_date: date, client_purchases: list[dict]) -> bytes:
+def generate_daily_pdf(report_date: date, client_purchases: list[dict],
+                       plan: str | None = None) -> bytes:
+    subtitle = f"Date: {report_date.strftime('%B %d, %Y')}"
+    if plan:
+        subtitle += f"  |  Plan: {plan}"
     return _build_pdf(
         title="Daily Sales Report",
-        subtitle=f"Date: {report_date.strftime('%B %d, %Y')}",
+        subtitle=subtitle,
         client_purchases=client_purchases,
     )
 
 
-def generate_monthly_pdf(year: int, month: int, client_purchases: list[dict]) -> bytes:
+def generate_monthly_pdf(year: int, month: int, client_purchases: list[dict],
+                         plan: str | None = None) -> bytes:
     from calendar import month_name
+    subtitle = f"Month: {month_name[month]} {year}"
+    if plan:
+        subtitle += f"  |  Plan: {plan}"
     return _build_pdf(
         title="Monthly Sales Report",
-        subtitle=f"Month: {month_name[month]} {year}",
+        subtitle=subtitle,
+        client_purchases=client_purchases,
+    )
+
+
+def generate_custom_pdf(start_str: str, end_str: str,
+                        client_purchases: list[dict],
+                        plan: str | None = None) -> bytes:
+    start = date.fromisoformat(start_str)
+    end   = date.fromisoformat(end_str)
+    subtitle = (f"Period: {start.strftime('%B %d, %Y')} "
+               f"to {end.strftime('%B %d, %Y')}")
+    if plan:
+        subtitle += f"  |  Plan: {plan}"
+    return _build_pdf(
+        title="Custom Range Sales Report",
+        subtitle=subtitle,
         client_purchases=client_purchases,
     )

@@ -1,6 +1,11 @@
 """
 Firestore client — single initialisation point.
-All endpoints import `fs` from here and call collection helpers directly.
+All endpoints import `db` from here and call collection helpers directly.
+
+LAZY INIT: db is NOT initialised at import time.  This allows the backend
+process to start and bind its port even when firebase_credentials.json is
+missing, so the /health endpoint always responds and the frontend login
+page can display while credentials are being configured.
 """
 import os
 import sys
@@ -13,34 +18,41 @@ from google.cloud.firestore_v1 import Client
 from app.core.config import settings
 
 
+# ── Credential discovery ──────────────────────────────────────
+
 def _find_credentials() -> str:
     """
     Search order:
     1. Env var FIREBASE_CREDENTIALS_PATH (absolute or relative to cwd)
     2. Next to the exe (PyInstaller production)
     3. backend/ folder (development)
+
+    Raises a descriptive FileNotFoundError listing every path tried.
     """
-    # Explicit env path
     env_path = settings.firebase_credentials_path
     if os.path.isabs(env_path) and os.path.exists(env_path):
         return env_path
 
     candidates = [
-        Path(env_path),                                  # relative to cwd
-        Path(sys.executable).parent / "firebase_credentials.json",  # next to exe
-        Path(__file__).parent.parent.parent / "firebase_credentials.json",  # backend/
+        Path(env_path),
+        Path(sys.executable).parent / "firebase_credentials.json",
+        Path(__file__).parent.parent.parent / "firebase_credentials.json",
     ]
     for p in candidates:
         if p.exists():
             return str(p)
 
+    searched = "\n  ".join(str(p.resolve()) for p in candidates)
     raise FileNotFoundError(
-        "firebase_credentials.json not found. "
-        "Place it next to the executable or in the backend/ folder."
+        "firebase_credentials.json not found.\n\n"
+        "Searched:\n"
+        f"  {searched}\n\n"
+        "Fix: place firebase_credentials.json next to the executable, "
+        "or set FIREBASE_CREDENTIALS_PATH in the .env file."
     )
 
 
-def init_firestore() -> Client:
+def _init_firestore() -> Client:
     if not firebase_admin._apps:
         cred_path = _find_credentials()
         cred = credentials.Certificate(cred_path)
@@ -48,14 +60,49 @@ def init_firestore() -> Client:
     return firestore.client()
 
 
-# ── Module-level client ───────────────────────────────────────
-db: Client = init_firestore()
+# ── Lazy client ───────────────────────────────────────────────
+
+_db: Client | None = None
+
+
+def _get_db() -> Client:
+    """Return the shared Firestore client, initialising it on first call."""
+    global _db
+    if _db is None:
+        _db = _init_firestore()
+    return _db
+
+
+class _LazyDB:
+    """
+    Proxy that forwards all attribute / method access to the real Firestore
+    client.  Backwards-compatible with code that does:
+        from app.core.firestore_client import db
+        db.collection(...)
+    """
+    def __getattr__(self, name):
+        return getattr(_get_db(), name)
+
+    def collection(self, *args, **kwargs):
+        return _get_db().collection(*args, **kwargs)
+
+    def collection_group(self, *args, **kwargs):
+        return _get_db().collection_group(*args, **kwargs)
+
+    def transaction(self, *args, **kwargs):
+        return _get_db().transaction(*args, **kwargs)
+
+    def batch(self, *args, **kwargs):
+        return _get_db().batch(*args, **kwargs)
+
+
+db: Client = _LazyDB()  # type: ignore[assignment]
 
 
 # ── Collection shortcuts ──────────────────────────────────────
 
 def col(name: str):
-    return db.collection(name)
+    return _get_db().collection(name)
 
 
 def accounts():
@@ -108,7 +155,7 @@ def next_uid(counter_name: str) -> int:
         transaction.set(ref, {counter_name: new_val}, merge=True)
         return new_val
 
-    return _increment(db.transaction(), ref)
+    return _increment(_get_db().transaction(), ref)
 
 
 def next_attendance_uid() -> int:

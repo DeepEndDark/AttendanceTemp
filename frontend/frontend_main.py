@@ -12,21 +12,22 @@ import os
 import sys
 
 def resource_path(relative_path: str) -> str:
-    
-
+    """Resolve a bundled asset path for both dev and PyInstaller builds."""
     if getattr(sys, "frozen", False):
         return os.path.join(sys._MEIPASS, relative_path)
+    # frontend_main.py lives at frontend/; assets/ is one level up at the
+    # repo root, matching how launch.spec bundles ("assets/...", ...).
+    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, relative_path)
 
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
-
-from fapp.api_client import api
+from fapp.api_client import api, APIClient, NetworkError
 from fapp.views.client_display import ClientDisplayWindow
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Tiger Fitness Gym")
+        self.title("Tiger's Fitness Gym")
         self.geometry("1100x680")
         self.minsize(860, 540)
         self._display_queue: queue.Queue = queue.Queue()
@@ -61,7 +62,7 @@ class App(tk.Tk):
     def _show_main(self):
         self._clear()
         self._view_cache.clear()
-        self.title(f"Tiger Fitness Gym — {api.account_name}")
+        self.title(f"Tiger's Fitness Gym — {api.account_name}")
 
         # Launch client display window
         self._client_win = ClientDisplayWindow(self, self._display_queue)
@@ -71,17 +72,32 @@ class App(tk.Tk):
         threading.Thread(target=self._scanner_loop, daemon=True).start()
 
         # Redirect to login on any 401 — token expired or invalidated
-        from fapp.api_client import APIClient
         APIClient.set_unauthorized_handler(
             lambda: self.after(0, self._on_unauthorized)
         )
+
+        # Show a persistent banner when requests can't reach the backend
+        APIClient.set_network_error_handler(
+            lambda msg: self.after(0, lambda: self._show_network_banner(msg))
+        )
+
+        # ── Network banner (hidden by default) ────────────────
+        self._net_banner = tk.Frame(self, bg="#7C2D12", height=28)
+        self._net_banner.pack_propagate(False)
+        self._net_banner_label = tk.Label(
+            self._net_banner, text="",
+            bg="#7C2D12", fg="#FED7AA", font=("", 9))
+        self._net_banner_label.pack(expand=True)
+        self._net_banner_visible = False
+        self._net_banner_hide_id = None
 
         # ── Header ───────────────────────────────────────────
         header = tk.Frame(self, bg="#E8500A", height=48)
         header.pack(fill="x", side="top")
         header.pack_propagate(False)
+        self._header_widget = header  # used to re-insert the banner above it
 
-        tk.Label(header, text="  Tiger Fitness Gym",
+        tk.Label(header, text="  Tiger's Fitness Gym",
                  bg="#E8500A", fg="white",
                  font=("", 12, "bold")).pack(side="left", padx=4)
 
@@ -206,13 +222,29 @@ class App(tk.Tk):
         """
         import time as _time
 
+        net_backoff = 0  # seconds to wait after a network failure
+
         while not self._scanner_stop.is_set():
 
+            if net_backoff:
+                _time.sleep(net_backoff)
+                net_backoff = 0
+
             # Stage 1 — wait for physical touch, client stays idle
-            touched, scanner_available = api.finger_touch()
+            try:
+                touched, scanner_available = api.finger_touch()
+            except NetworkError:
+                # Backend unreachable — banner already fired by api_client.
+                # Back off and retry; do NOT treat this as a 401/session issue.
+                self._display_queue.put({"type": "clear"})
+                net_backoff = 10
+                continue
 
             if self._scanner_stop.is_set():
                 break
+
+            # A successful call means connectivity is back — clear any banner
+            self.after(0, self._hide_network_banner)
 
             if not touched:
                 if not scanner_available:
@@ -229,46 +261,77 @@ class App(tk.Tk):
             })
 
             # Stage 3 — FID already processed, identify and get result
-            event = api.fingerprint_scan()
+            try:
+                event = api.fingerprint_scan()
+            except NetworkError:
+                self._display_queue.put({"type": "clear"})
+                net_backoff = 10
+                continue
 
             if self._scanner_stop.is_set():
                 break
 
             if event:
                 self._display_queue.put(event)
+                self.after(0, self._hide_network_banner)
                 # Signal attendance view to refresh if a time-in/out occurred
                 if event.get("type") in ("time_in", "time_out",
                                          "expiry_warn", "expired"):
                     self._att_queue.put(True)
             else:
-                # Network / auth error
+                # Auth error (401 already handled via the unauthorized hook)
                 self._display_queue.put({"type": "clear"})
                 _time.sleep(1)
 
+    def _show_network_banner(self, message: str = "No connection — retrying…"):
+        """Show a persistent warning banner at the top of the window."""
+        if not hasattr(self, "_net_banner") or not self._net_banner.winfo_exists():
+            return
+        if getattr(self, "_header_widget", None) is None or \
+           not self._header_widget.winfo_exists():
+            return  # main window isn't showing right now (e.g. mid-logout)
+        if self._net_banner_hide_id:
+            self.after_cancel(self._net_banner_hide_id)
+            self._net_banner_hide_id = None
+        self._net_banner_label.config(text=f"⚠  {message}")
+        if not self._net_banner_visible:
+            self._net_banner.pack(fill="x", side="top", before=self._header_widget)
+            self._net_banner_visible = True
+        # Auto-dismiss after 8 s — it reappears immediately if the next
+        # request also fails, so this just clears stale messages.
+        self._net_banner_hide_id = self.after(8000, self._hide_network_banner)
+
+    def _hide_network_banner(self):
+        if not hasattr(self, "_net_banner") or not self._net_banner.winfo_exists():
+            return
+        self._net_banner.pack_forget()
+        self._net_banner_visible = False
+        self._net_banner_hide_id = None
+
     def _on_unauthorized(self):
         """Called on main thread when any API request returns 401."""
-        from fapp.api_client import APIClient
         APIClient.clear_unauthorized_handler()
+        APIClient.clear_network_error_handler()
         self._scanner_stop.set()
         api.logout()
         if self._client_win:
             self._client_win.destroy()
             self._client_win = None
-        self.title("Tiger Fitness Gym")
+        self.title("Tiger's Fitness Gym")
         import tkinter.messagebox as mb
         mb.showwarning("Session Expired",
                        "Your session has expired. Please log in again.")
         self._show_login()
 
     def _logout(self):
-        from fapp.api_client import APIClient
         APIClient.clear_unauthorized_handler()
+        APIClient.clear_network_error_handler()
         self._scanner_stop.set()
         api.logout()
         if self._client_win:
             self._client_win.destroy()
             self._client_win = None
-        self.title("Tiger Fitness Gym")
+        self.title("Tiger's Fitness Gym")
         self._show_login()
 
     def _clear(self):
@@ -277,3 +340,6 @@ class App(tk.Tk):
         self._current_view = None
         self._nav_buttons = {}
         self._view_cache = {}
+        self._net_banner_visible = False
+        self._net_banner_hide_id = None
+        self._header_widget = None

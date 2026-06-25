@@ -34,5 +34,19 @@ def require_admin(current_user: TokenData = Depends(get_current_user)) -> TokenD
     return current_user
 
 
+def require_local_admin(current_user: TokenData = Depends(get_current_user)) -> TokenData:
+    """
+    Used only by the Firebase setup-recovery endpoint.  Accepts a token
+    issued by /auth/local-login (account_type == "local_admin") — this
+    bypasses Firestore entirely so it still works when the DB is down.
+    """
+    if current_user.account_type != "local_admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Local admin access required"
+        )
+    return current_user
+
+
 def require_any(current_user: TokenData = Depends(get_current_user)) -> TokenData:
     return current_user

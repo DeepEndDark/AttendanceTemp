@@ -100,6 +100,7 @@ hidden = (
     + collect_submodules("google.cloud.firestore")
     + collect_submodules("google.auth")
     + collect_submodules("pythonnet")
+    + collect_submodules("PIL")
     + [
         # Backend app package
         "app",
@@ -204,7 +205,8 @@ a = Analysis(
         ("backend/main.py", "."),
         ("frontend/fapp", "fapp"),
         ("frontend/frontend_main.py", "frontend_main.py"),
-        ("assets/tgym.ico", "assets/tgym.ico")
+        ("assets/tgym.ico", "assets/tgym.ico"),
+        ("assets/tgymbbg.jpg", "assets/tgymbbg.jpg")
     ],
     hiddenimports=hidden,
     hookspath=[],
@@ -234,7 +236,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name="Tiger Fitness Gym",
+    name="Tiger's Fitness Gym",
     icon="assets/tgym.ico",
     debug=False,
     strip=False,

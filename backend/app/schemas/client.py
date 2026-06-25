@@ -45,6 +45,7 @@ class ClientRead(BaseModel):
     created_at: str | None
     last_enrolled_at: str | None
     last_plan_expires_at: str | None
+    active_subscription_names: list[str] = []   # plan(s) currently active
     fingerprint_enrolled: bool
 
 

@@ -134,6 +134,59 @@ def _make_date_entry(parent, var: tk.StringVar, label: str) -> tk.Frame:
     return frm
 
 
+def make_searchable_combobox(
+    parent, var: tk.StringVar, all_values: list[str], width: int = 26,
+) -> ttk.Combobox:
+    """
+    An editable Combobox that filters its dropdown list as the user types
+    (type-to-search), instead of being locked to a closed/readonly list.
+
+    - Typing narrows `values` to entries containing the typed text
+      (case-insensitive substring match) and opens the dropdown.
+    - The full list is restored when the field is cleared.
+    - Clicking the dropdown arrow with an empty/unmatched field always
+      shows the complete list, never an empty box.
+    - Returns the live (closure-captured) full list via cb._full_values
+      so callers can update it later, e.g. cb._full_values[:] = new_list.
+    """
+    cb = ttk.Combobox(parent, textvariable=var, state="normal", width=width)
+    cb._full_values = list(all_values)
+    cb["values"] = cb._full_values
+
+    def _on_keyrelease(event=None):
+        # Ignore navigation/selection keys — they shouldn't re-filter
+        if event is not None and event.keysym in (
+            "Up", "Down", "Left", "Right", "Return", "Tab", "Escape"
+        ):
+            return
+        typed = var.get().strip().lower()
+        if not typed:
+            cb["values"] = cb._full_values
+            return
+        matches = [v for v in cb._full_values if typed in v.lower()]
+        cb["values"] = matches if matches else cb._full_values
+        try:
+            cb.event_generate("<Down>") if matches else None
+        except Exception:
+            pass
+
+    def _on_focus_out(event=None):
+        # If what's typed doesn't exactly match any known value, leave it
+        # as-is — calling code validates on submit. Just restore the full
+        # list so the dropdown isn't stuck showing a filtered subset.
+        cb["values"] = cb._full_values
+
+    cb.bind("<KeyRelease>", _on_keyrelease)
+    cb.bind("<FocusOut>", _on_focus_out)
+    return cb
+
+
+def update_searchable_combobox_values(cb: ttk.Combobox, values: list[str]):
+    """Update the backing full-value list of a make_searchable_combobox()."""
+    cb._full_values = list(values)
+    cb["values"] = cb._full_values
+
+
 # ── Main view ──────────────────────────────────────────────────
 
 class AdminAttendanceView(tk.Frame):
@@ -143,6 +196,7 @@ class AdminAttendanceView(tk.Frame):
         self._att_queue = att_queue
         self._loading   = False
         self._all_logs: list[dict] = []
+        self._all_clients: list[dict] = []
         self._build()
         self._poll_att_queue()
 
@@ -172,8 +226,8 @@ class AdminAttendanceView(tk.Frame):
 
         tk.Label(flt, text="Client:", bg="white").pack(side="left")
         self._client_var = tk.StringVar()
-        self._client_cb = ttk.Combobox(flt, textvariable=self._client_var,
-                                       width=18, state="readonly")
+        self._client_cb = make_searchable_combobox(
+            flt, self._client_var, [""], width=18)
         self._client_cb.pack(side="left", padx=4)
 
         self._date_exact = tk.StringVar()
@@ -191,6 +245,15 @@ class AdminAttendanceView(tk.Frame):
                   relief="flat", padx=8).pack(side="left", padx=6)
         tk.Button(flt, text="Clear", command=self.refresh,
                   relief="flat", padx=8).pack(side="left")
+
+        tk.Label(flt, text="Plan:", bg="white").pack(side="left", padx=(10, 0))
+        self._plan_filter_var = tk.StringVar(value="All Plans")
+        self._plan_filter_cb = ttk.Combobox(
+            flt, textvariable=self._plan_filter_var,
+            values=["All Plans"], state="readonly", width=16)
+        self._plan_filter_cb.pack(side="left", padx=4)
+        self._plan_filter_cb.bind("<<ComboboxSelected>>",
+                                  lambda _e: self._apply_plan_filter())
 
         # ── Tree (extended multiselect + checkboxes) ───────────
         cols = ("chk", "uid", "date", "client", "time_in", "time_out")
@@ -287,9 +350,13 @@ class AdminAttendanceView(tk.Frame):
     def _refresh_worker(self):
         try:
             clients_list = api.list_clients()
+            try:
+                subs = api.list_subscriptions()
+            except Exception:
+                subs = []
             today = date.today().isoformat()
             logs  = api.list_attendance(date_exact=today)
-            self.after(0, lambda: self._refresh_complete(clients_list, logs))
+            self.after(0, lambda: self._refresh_complete(clients_list, logs, subs))
         except APIError as e:
             msg = str(e)
             self.after(0, lambda msg=msg: self._show_error(msg))
@@ -297,13 +364,35 @@ class AdminAttendanceView(tk.Frame):
             msg = f"Error: {e}"
             self.after(0, lambda msg=msg: self._show_error(msg))
 
-    def _refresh_complete(self, clients_list: list[dict], logs: list[dict]):
+    def _refresh_complete(self, clients_list: list[dict], logs: list[dict],
+                          subs: list[dict] | None = None):
         names = [c["client_name"] for c in clients_list]
-        self._client_cb["values"] = [""] + names
+        update_searchable_combobox_values(self._client_cb, [""] + names)
         self._client_cb.set("")
+        self._all_clients = clients_list
+
+        if subs is not None:
+            plan_names = sorted({s["subscription_name"] for s in subs})
+            self._plan_filter_cb["values"] = ["All Plans"] + plan_names
+            self._plan_filter_var.set("All Plans")
+
         self._all_logs = logs
-        self._populate(logs)
+        self._apply_plan_filter()
         self._set_loading(False)
+
+    def _apply_plan_filter(self):
+        """Filter the currently loaded logs to clients on the selected plan."""
+        plan = self._plan_filter_var.get()
+        if plan and plan != "All Plans":
+            matching_names = {
+                c["client_name"] for c in self._all_clients
+                if plan in (c.get("active_subscription_names") or [])
+            }
+            visible = [l for l in self._all_logs
+                      if l["client_name"] in matching_names]
+        else:
+            visible = self._all_logs
+        self._populate(visible)
 
     def _refresh_client_cb(self):
         """Refresh client dropdown live before time-in/out actions."""
@@ -311,8 +400,8 @@ class AdminAttendanceView(tk.Frame):
             try:
                 clients_list = api.list_clients()
                 names = [c["client_name"] for c in clients_list]
-                self.after(0, lambda: self._client_cb.config(
-                    values=[""] + names))
+                self.after(0, lambda: update_searchable_combobox_values(
+                    self._client_cb, [""] + names))
             except Exception:
                 pass
         self._run_worker(_worker, "att-cb-refresh")
@@ -356,7 +445,7 @@ class AdminAttendanceView(tk.Frame):
         for c, lbl in {"date": "Date", "client": "Client",
                        "time_in": "Time In", "time_out": "Time Out"}.items():
             self._tree.heading(c, text=lbl)
-        self._populate(logs)
+        self._apply_plan_filter()
         self._status.config(text=f"{len(logs)} record(s) — filtered")
         self._set_loading(False)
 
@@ -449,7 +538,7 @@ class AdminAttendanceView(tk.Frame):
             arrow = (" ▲" if self._sort_asc else " ▼") if c == col else ""
             self._tree.heading(c, text=lbl + arrow)
 
-        self._populate(self._all_logs)
+        self._apply_plan_filter()
 
     # ---------------------------------------------------------
     # Checkbox logic

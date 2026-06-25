@@ -13,6 +13,7 @@ class AdminSalesView(tk.Frame):
 
         self._selected_uid: int | None = None
         self._all_sales: list[dict] = []
+        self._all_clients: list[dict] = []
         self._sale_map: dict[int, dict] = {}
         self._loading = False
         self._detail_loading_uid: int | None = None
@@ -141,6 +142,15 @@ class AdminSalesView(tk.Frame):
             relief="flat",
             padx=6
         ).pack(side="left")
+
+        tk.Label(flt, text="Plan:", bg="white").pack(side="left", padx=(10, 0))
+        self._plan_filter_var = tk.StringVar(value="All Plans")
+        self._plan_filter_cb = ttk.Combobox(
+            flt, textvariable=self._plan_filter_var,
+            values=["All Plans"], state="readonly", width=16)
+        self._plan_filter_cb.pack(side="left", padx=4)
+        self._plan_filter_cb.bind("<<ComboboxSelected>>",
+                                  lambda _e: self._apply_filter())
 
         # Split
         split = tk.Frame(self, bg="white")
@@ -379,10 +389,16 @@ class AdminSalesView(tk.Frame):
         try:
             items = api.list_items()
             sales = api.list_all_sales(date_exact=date.today().isoformat())
+            try:
+                clients_list = api.list_clients()
+                subs = api.list_subscriptions()
+            except Exception:
+                clients_list, subs = [], []
 
             self.after(
                 0,
-                lambda: self._refresh_complete(items, sales, None)
+                lambda: self._refresh_complete(items, sales, None,
+                                               clients_list, subs)
             )
 
         except APIError as e:
@@ -404,6 +420,8 @@ class AdminSalesView(tk.Frame):
         items: list[dict],
         sales: list[dict],
         preserve_uid: int | None = None,
+        clients_list: list[dict] | None = None,
+        subs: list[dict] | None = None,
     ):
         self._add_item_cb["values"] = [
             i["item_name"]
@@ -412,6 +430,13 @@ class AdminSalesView(tk.Frame):
         ]
 
         self._all_sales = sales
+
+        if clients_list is not None:
+            self._all_clients = clients_list
+        if subs is not None:
+            plan_names = sorted({s["subscription_name"] for s in subs})
+            self._plan_filter_cb["values"] = ["All Plans"] + plan_names
+            self._plan_filter_var.set("All Plans")
 
         self._sale_map = {
             int(s["sales_uid"]): s
@@ -531,6 +556,17 @@ class AdminSalesView(tk.Frame):
             visible_sales = [
                 s for s in visible_sales
                 if s.get("sale_status") == status_filter
+            ]
+
+        plan_filter = self._plan_filter_var.get()
+        if plan_filter and plan_filter != "All Plans":
+            matching_names = {
+                c["client_name"] for c in self._all_clients
+                if plan_filter in (c.get("active_subscription_names") or [])
+            }
+            visible_sales = [
+                s for s in visible_sales
+                if s.get("client_name") in matching_names
             ]
 
         by_date: dict[str, list] = {}

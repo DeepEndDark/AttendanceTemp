@@ -11,16 +11,17 @@ class ClientsView(tk.Frame):
         super().__init__(master, bg="white")
         self._queue   = display_queue
         self._loading = False
+        self._all_clients: list[dict] = []
         self._build()
 
     def _build(self):
         self.columnconfigure(0, weight=2)
         self.columnconfigure(1, weight=3)
-        self.rowconfigure(1, weight=1)
+        self.rowconfigure(2, weight=1)
 
         bar = tk.Frame(self, bg="white")
         bar.grid(row=0, column=0, columnspan=2,
-                 sticky="ew", padx=16, pady=10)
+                 sticky="ew", padx=16, pady=(10, 4))
         tk.Label(bar, text="Client List",
                  font=("", 14, "bold"), bg="white").pack(side="left")
         tk.Button(bar, text="Refresh", command=self.refresh,
@@ -36,6 +37,20 @@ class ClientsView(tk.Frame):
         tk.Button(bar, text="Enroll New", command=self._enroll,
                   bg="#E8500A", fg="white",
                   relief="flat", padx=10).pack(side="right", padx=4)
+
+        # ── Filter row ─────────────────────────────────────────
+        filt = tk.Frame(self, bg="white")
+        filt.grid(row=1, column=0, columnspan=2, sticky="ew",
+                  padx=16, pady=(0, 6))
+        tk.Label(filt, text="Filter by plan:", bg="white",
+                 font=("", 9)).pack(side="left")
+        self._plan_filter_var = tk.StringVar(value="All Plans")
+        self._plan_filter_cb = ttk.Combobox(
+            filt, textvariable=self._plan_filter_var,
+            values=["All Plans"], state="readonly", width=20)
+        self._plan_filter_cb.pack(side="left", padx=4)
+        self._plan_filter_cb.bind("<<ComboboxSelected>>",
+                                  lambda _e: self._apply_plan_filter())
 
         cols = ("uid", "name", "status", "days", "trainer", "locker", "expires")
         self._tree = ttk.Treeview(self, columns=cols,
@@ -54,18 +69,18 @@ class ClientsView(tk.Frame):
         sb = ttk.Scrollbar(self, orient="vertical",
                            command=self._tree.yview)
         self._tree.configure(yscrollcommand=sb.set)
-        self._tree.grid(row=1, column=0, sticky="nsew",
+        self._tree.grid(row=2, column=0, sticky="nsew",
                         padx=(16, 0), pady=4)
-        sb.grid(row=1, column=1, sticky="nsw", pady=4)
+        sb.grid(row=2, column=1, sticky="nsw", pady=4)
         self._tree.bind("<<TreeviewSelect>>", self._on_select)
 
         self._detail = _ClientDetailPanel(self)
-        self._detail.grid(row=1, column=1, sticky="nsew",
+        self._detail.grid(row=2, column=1, sticky="nsew",
                           padx=(4, 16), pady=4)
 
         self._status_lbl = tk.Label(self, text="", fg="gray",
                                     bg="white", anchor="w")
-        self._status_lbl.grid(row=2, column=0, columnspan=2,
+        self._status_lbl.grid(row=3, column=0, columnspan=2,
                                sticky="ew", padx=16, pady=4)
         self.refresh()
 
@@ -94,7 +109,11 @@ class ClientsView(tk.Frame):
     def _refresh_worker(self):
         try:
             clients = api.list_clients()
-            self.after(0, lambda: self._refresh_complete(clients))
+            try:
+                subs = api.list_subscriptions()
+            except Exception:
+                subs = []
+            self.after(0, lambda: self._refresh_complete(clients, subs))
         except APIError as e:
             msg = str(e)
             self.after(0, lambda msg=msg: self._show_error(msg))
@@ -102,8 +121,33 @@ class ClientsView(tk.Frame):
             msg = f"Error: {e}"
             self.after(0, lambda msg=msg: self._show_error(msg))
 
-    def _refresh_complete(self, clients: list):
+    def _refresh_complete(self, clients: list, subs: list | None = None):
         self._loading = False
+        self._all_clients = clients
+
+        if subs is not None:
+            plan_names = sorted({s["subscription_name"] for s in subs})
+            current = self._plan_filter_var.get()
+            self._plan_filter_cb["values"] = ["All Plans"] + plan_names
+            # Keep current selection if it's still valid, else reset
+            if current not in (["All Plans"] + plan_names):
+                self._plan_filter_var.set("All Plans")
+
+        self._apply_plan_filter()
+
+    def _apply_plan_filter(self):
+        """Render the tree from cached clients, filtered by selected plan."""
+        plan = self._plan_filter_var.get()
+        if plan and plan != "All Plans":
+            visible = [
+                c for c in self._all_clients
+                if plan in (c.get("active_subscription_names") or [])
+            ]
+        else:
+            visible = self._all_clients
+        self._render_tree(visible)
+
+    def _render_tree(self, clients: list):
         sel_name = self._selected_name(warn=False)
         self._tree.delete(*self._tree.get_children())
         for c in clients:

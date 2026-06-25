@@ -7,9 +7,10 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 from fapp.api_client import api, APIError
+from fapp.views.admin_attendance_view import make_searchable_combobox
 
 
-COLS = 8   # lockers per row in the grid
+COLS = 6   # lockers per row in the grid (reduced — tiles are now larger)
 
 
 class LockerView(tk.Frame):
@@ -207,24 +208,27 @@ class LockerView(tk.Frame):
 
             if c is None:
                 bg, fg = "#2ECC71", "white"
-                label = f"#{num}\nFree"
+                label = f"#{num}\n\nFree"
             else:
                 # Use per-locker days_remaining, not the total across all lockers
-                days = c.get("days_remaining", c.get("client_locker_days_remaining", 0))
-                bg   = "#BA7517" if days <= 3 else "#E8500A"
-                fg   = "white"
-                name_short = c["client_name"][:10] + "…" \
-                    if len(c["client_name"]) > 10 else c["client_name"]
-                label = f"#{num}\n{name_short}\n{days}d"
+                days    = c.get("days_remaining", c.get("client_locker_days_remaining", 0))
+                bg      = "#BA7517" if days <= 3 else "#E8500A"
+                fg      = "white"
+                expires = (c.get("expires_at") or "")[:10] or "—"
+                name_short = c["client_name"][:14] + "…" \
+                    if len(c["client_name"]) > 14 else c["client_name"]
+                label = (f"#{num}\n{name_short}\n"
+                         f"{days}d left\nExpires: {expires}")
 
             btn = tk.Button(
                 self._grid_frame,
                 text=label, bg=bg, fg=fg,
-                width=9, height=3,
+                width=14, height=5,
+                font=("", 9),
                 command=lambda n=num: self._on_locker_click(n))
             self._locker_buttons[num] = btn
             self._style_locker_button(num)
-            btn.grid(row=row, column=col, padx=7, pady=7)
+            btn.grid(row=row, column=col, padx=10, pady=10)
 
     def _on_locker_click(self, num: int):
         previous = self._selected_locker
@@ -235,9 +239,11 @@ class LockerView(tk.Frame):
 
         c = self._locker_data.get(num)
         if c:
+            days    = c.get("days_remaining", c.get("client_locker_days_remaining", 0))
+            expires = (c.get("expires_at") or "")[:10] or "—"
             self._status.config(
                 text=f"Selected: Locker #{num} — {c['client_name']} "
-                     f"({c['client_locker_days_remaining']} days remaining)",
+                     f"({days} days remaining, expires {expires})",
                 fg="#E8500A")
         else:
             self._status.config(
@@ -371,14 +377,16 @@ class LockerView(tk.Frame):
                 }
         c = self._locker_data.get(num)
         if c is None:
-            bg, fg, label = "#2ECC71", "white", f"#{num}\nFree"
+            bg, fg, label = "#2ECC71", "white", f"#{num}\n\nFree"
         else:
             days       = c.get("days_remaining", c.get("client_locker_days_remaining", 0))
             bg         = "#BA7517" if days <= 3 else "#E8500A"
             fg         = "white"
-            name_short = c["client_name"][:10] + "…" \
-                if len(c["client_name"]) > 10 else c["client_name"]
-            label = f"#{num}\n{name_short}\n{days}d"
+            expires    = (c.get("expires_at") or "")[:10] or "—"
+            name_short = c["client_name"][:14] + "…" \
+                if len(c["client_name"]) > 14 else c["client_name"]
+            label = (f"#{num}\n{name_short}\n"
+                     f"{days}d left\nExpires: {expires}")
 
         btn = self._locker_buttons.get(num)
         if btn:
@@ -445,6 +453,7 @@ class _AssignDialog(tk.Toplevel):
         self.resizable(False, False)
         self.grab_set()
         self.result = None
+        self._all_clients = all_clients
 
         frame = tk.Frame(self, bg="white", padx=20, pady=16)
         frame.pack(fill="both", expand=True)
@@ -457,11 +466,11 @@ class _AssignDialog(tk.Toplevel):
         tk.Label(frame, text="Client:", bg="white",
                  font=("", 9)).grid(row=1, column=0, sticky="w", pady=6)
         self._client_var = tk.StringVar()
-        cb = ttk.Combobox(frame, textvariable=self._client_var,
-                          values=all_clients, state="readonly", width=26)
+        cb = make_searchable_combobox(
+            frame, self._client_var, all_clients, width=26)
         cb.grid(row=1, column=1, padx=(10, 0), pady=6)
         if all_clients:
-            cb.current(0)
+            self._client_var.set(all_clients[0])
 
         # Build locker number list: show all, mark occupied ones
         rented = rented_numbers or set()
@@ -509,9 +518,14 @@ class _AssignDialog(tk.Toplevel):
         self.wait_window()
 
     def _save(self):
-        client = self._client_var.get()
+        client = self._client_var.get().strip()
         if not client:
             self._err.config(text="Select a client.")
+            return
+        if client not in self._all_clients:
+            self._err.config(
+                text=f"No client named '{client}' found. "
+                     "Pick one from the dropdown list.")
             return
         raw = self._num_var.get()
         if not raw:

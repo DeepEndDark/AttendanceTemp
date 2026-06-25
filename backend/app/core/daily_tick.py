@@ -188,6 +188,11 @@ def _tick_client(client_name: str, days: int) -> None:
     expiry_dates  = [v.get("expires_at", "") for v in still_active_data
                      if v.get("expires_at")]
     last_expires  = max(expiry_dates) if expiry_dates else None
+    active_plan_names = []
+    for v in still_active_data:
+        name = v.get("subscription_name")
+        if name and name not in active_plan_names:
+            active_plan_names.append(name)
 
     # ── Tick lockers ──────────────────────────────────────────
     lockers = client_data.get("lockers", [])
@@ -216,6 +221,7 @@ def _tick_client(client_name: str, days: int) -> None:
         "client_trainer_days_remaining": total_trainer,
         "client_locker_days_remaining":  total_locker_days,
         "last_plan_expires_at":          last_expires,
+        "active_subscription_names":    active_plan_names,
         "lockers":                       updated_lockers,
         "locker_number":                 primary_locker,
     }

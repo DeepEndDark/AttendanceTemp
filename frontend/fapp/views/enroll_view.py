@@ -1,527 +1,760 @@
-"""
-Sales role — Enroll Client tab.
-Left panel: new enrollment / re-enroll with subscription picker.
-Right panel: time-in / time-out + locker rental.
-"""
+import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
+from datetime import date
+
 from fapp.api_client import api, APIError
 
 
-class EnrollView(tk.Frame):
+# ── Minimal inline calendar picker ────────────────────────────
+
+class _CalPicker(tk.Toplevel):
+    """Compact month-grid date picker. Sets result on OK."""
+
+    def __init__(self, parent, initial: date | None = None):
+        super().__init__(parent)
+        self.title("Pick Date")
+        self.resizable(False, False)
+        self.grab_set()
+        self.result: date | None = None
+
+        self._sel = initial or date.today()
+        self._year  = self._sel.year
+        self._month = self._sel.month
+
+        self._build()
+        self.wait_window()
+
+    def _build(self):
+        nav = tk.Frame(self)
+        nav.pack(fill="x", padx=6, pady=4)
+        tk.Button(nav, text="◀", command=self._prev, width=2).pack(side="left")
+        self._hdr = tk.Label(nav, font=("", 10, "bold"), width=16)
+        self._hdr.pack(side="left", expand=True)
+        tk.Button(nav, text="▶", command=self._next, width=2).pack(side="right")
+
+        self._grid_frm = tk.Frame(self)
+        self._grid_frm.pack(padx=6)
+
+        for i, d in enumerate(("Mo","Tu","We","Th","Fr","Sa","Su")):
+            tk.Label(self._grid_frm, text=d, width=4,
+                     font=("", 8, "bold")).grid(row=0, column=i)
+
+        self._btns: list[tk.Button] = []
+        for r in range(6):
+            for c in range(7):
+                b = tk.Button(self._grid_frm, width=3,
+                              command=lambda r=r, c=c: self._click(r, c))
+                b.grid(row=r+1, column=c, padx=1, pady=1)
+                self._btns.append(b)
+
+        bot = tk.Frame(self)
+        bot.pack(fill="x", padx=6, pady=6)
+        tk.Button(bot, text="Today",
+                  command=self._today).pack(side="left")
+        tk.Button(bot, text="OK",
+                  command=self._ok).pack(side="right", padx=4)
+        tk.Button(bot, text="Cancel",
+                  command=self.destroy).pack(side="right")
+
+        self._render()
+
+    def _render(self):
+        import calendar
+        self._hdr.config(
+            text=date(self._year, self._month, 1).strftime("%B %Y"))
+        cal = calendar.monthcalendar(self._year, self._month)
+        for i, b in enumerate(self._btns):
+            r, c = divmod(i, 7)
+            day = cal[r][c] if r < len(cal) else 0
+            if day == 0:
+                b.config(text="", state="disabled", bg="SystemButtonFace")
+            else:
+                is_sel = (day == self._sel.day and
+                          self._year == self._sel.year and
+                          self._month == self._sel.month)
+                b.config(text=str(day), state="normal",
+                         bg="#E8500A" if is_sel else "SystemButtonFace",
+                         fg="white"  if is_sel else "black")
+                b._day = day  # type: ignore[attr-defined]
+
+    def _click(self, r, c):
+        import calendar
+        cal = calendar.monthcalendar(self._year, self._month)
+        if r >= len(cal):
+            return
+        day = cal[r][c]
+        if day:
+            self._sel = date(self._year, self._month, day)
+            self._render()
+
+    def _prev(self):
+        if self._month == 1:
+            self._year -= 1; self._month = 12
+        else:
+            self._month -= 1
+        self._render()
+
+    def _next(self):
+        if self._month == 12:
+            self._year += 1; self._month = 1
+        else:
+            self._month += 1
+        self._render()
+
+    def _today(self):
+        t = date.today()
+        self._year, self._month, self._sel = t.year, t.month, t
+        self._render()
+
+    def _ok(self):
+        self.result = self._sel
+        self.destroy()
+
+
+def _make_date_entry(parent, var: tk.StringVar, label: str) -> tk.Frame:
+    """Label + read-only Entry + calendar button packed left."""
+    frm = tk.Frame(parent, bg="white")
+    tk.Label(frm, text=label, bg="white").pack(side="left")
+    ent = tk.Entry(frm, textvariable=var, width=10, state="readonly")
+    ent.pack(side="left", padx=2)
+    def _pick():
+        try:
+            init = date.fromisoformat(var.get())
+        except ValueError:
+            init = date.today()
+        dlg = _CalPicker(parent.winfo_toplevel(), init)
+        if dlg.result:
+            var.set(dlg.result.isoformat())
+    tk.Button(frm, text="📅", command=_pick,
+              relief="flat", padx=2).pack(side="left")
+    tk.Button(frm, text="✕",
+              command=lambda: var.set(""),
+              relief="flat", padx=2).pack(side="left")
+    return frm
+
+
+def make_searchable_combobox(
+    parent, var: tk.StringVar, all_values: list[str], width: int = 26,
+) -> ttk.Combobox:
+    """
+    An editable Combobox that filters its dropdown list as the user types
+    (type-to-search), instead of being locked to a closed/readonly list.
+
+    - Typing narrows `values` to entries containing the typed text
+      (case-insensitive substring match) and opens the dropdown.
+    - The full list is restored when the field is cleared.
+    - Clicking the dropdown arrow with an empty/unmatched field always
+      shows the complete list, never an empty box.
+    - Returns the live (closure-captured) full list via cb._full_values
+      so callers can update it later, e.g. cb._full_values[:] = new_list.
+    """
+    cb = ttk.Combobox(parent, textvariable=var, state="normal", width=width)
+    cb._full_values = list(all_values)
+    cb["values"] = cb._full_values
+
+    def _on_keyrelease(event=None):
+        # Ignore navigation/selection keys — they shouldn't re-filter
+        if event is not None and event.keysym in (
+            "Up", "Down", "Left", "Right", "Return", "Tab", "Escape"
+        ):
+            return
+        typed = var.get().strip().lower()
+        if not typed:
+            cb["values"] = cb._full_values
+            return
+        matches = [v for v in cb._full_values if typed in v.lower()]
+        cb["values"] = matches if matches else cb._full_values
+        try:
+            cb.event_generate("<Down>") if matches else None
+        except Exception:
+            pass
+
+    def _on_focus_out(event=None):
+        # If what's typed doesn't exactly match any known value, leave it
+        # as-is — calling code validates on submit. Just restore the full
+        # list so the dropdown isn't stuck showing a filtered subset.
+        cb["values"] = cb._full_values
+
+    cb.bind("<KeyRelease>", _on_keyrelease)
+    cb.bind("<FocusOut>", _on_focus_out)
+    return cb
+
+
+def update_searchable_combobox_values(cb: ttk.Combobox, values: list[str]):
+    """Update the backing full-value list of a make_searchable_combobox()."""
+    cb._full_values = list(values)
+    cb["values"] = cb._full_values
+
+
+# ── Main view ──────────────────────────────────────────────────
+
+class AdminAttendanceView(tk.Frame):
     def __init__(self, master, display_queue=None, att_queue=None, **kwargs):
         super().__init__(master, bg="white")
         self._queue     = display_queue
         self._att_queue = att_queue
-        self._subs: list[dict] = []
+        self._loading   = False
+        self._all_logs: list[dict] = []
+        self._all_clients: list[dict] = []
         self._build()
         self._poll_att_queue()
 
     def _build(self):
         self.columnconfigure(0, weight=1)
-        self.columnconfigure(1, weight=1)
-        self.rowconfigure(1, weight=1)
+        self.rowconfigure(2, weight=1)
 
-        tk.Label(self, text="Client Enrollment",
-                 font=("", 14, "bold"),
-                 bg="white").grid(row=0, column=0, columnspan=2,
-                                  sticky="w", padx=20, pady=(16, 4))
-
-        self._build_enroll_panel()
-        self._build_action_panel()
-
-    # ── Left: enroll ──────────────────────────────────────────
-
-    def _build_enroll_panel(self):
-        pane = tk.LabelFrame(self, text="New Enrollment / Re-enroll",
-                             bg="white", padx=14, pady=14)
-        pane.grid(row=1, column=0, sticky="nsew",
-                  padx=(20, 8), pady=10)
-        pane.columnconfigure(1, weight=1)
-
-        fields = [
-            ("Client name:", "_name"),
-            ("Contact number:", "_contact"),
-            ("Address:", "_address"),
-        ]
-        self._entries = {}
-        for i, (lbl, key) in enumerate(fields):
-            tk.Label(pane, text=lbl, bg="white").grid(
-                row=i, column=0, sticky="w", pady=5)
-            e = tk.Entry(pane, width=26)
-            e.grid(row=i, column=1, sticky="ew",
-                   padx=(8, 0), pady=5)
-            self._entries[key] = e
-
-        # Subscription picker
-        tk.Label(pane, text="Subscription plan:",
-                 bg="white").grid(row=3, column=0, sticky="w", pady=5)
-        self._sub_var = tk.StringVar()
-        self._sub_cb = ttk.Combobox(pane, textvariable=self._sub_var,
-                                    state="readonly", width=24)
-        self._sub_cb.grid(row=3, column=1, sticky="ew",
-                          padx=(8, 0), pady=5)
-        self._sub_cb.bind("<<ComboboxSelected>>", self._show_sub_detail)
-
-        self._sub_detail = tk.Label(pane, text="", fg="#E8500A",
-                                    bg="white", font=("", 9),
-                                    wraplength=260, justify="left")
-        self._sub_detail.grid(row=4, column=0, columnspan=2,
-                               sticky="w", pady=(0, 8))
-
-        btn_row = tk.Frame(pane, bg="white")
-        btn_row.grid(row=5, column=0, columnspan=2, pady=(4, 0))
-        tk.Button(btn_row, text="Enroll New",
-                  command=self._enroll_new,
-                  bg="#E8500A", fg="white",
-                  relief="flat", padx=12, pady=6).pack(side="left", padx=4)
-        tk.Button(btn_row, text="Re-enroll",
-                  command=self._re_enroll,
-                  bg="#0F6E56", fg="white",
-                  relief="flat", padx=12, pady=6).pack(side="left", padx=4)
-
-        self._enroll_status = tk.Label(pane, text="", fg="#E8500A",
-                                       bg="white", wraplength=280,
-                                       font=("", 9))
-        self._enroll_status.grid(row=6, column=0, columnspan=2,
-                                  pady=(4, 0))
-
-        # FP prompt -- shown after successful enrollment
-        self._fp_frame = tk.Frame(pane, bg="white")
-        self._fp_frame.grid(row=7, column=0, columnspan=2,
-                            sticky="w", pady=(4, 0))
-        self._fp_btn = tk.Button(self._fp_frame,
-                                 text="Enroll Fingerprint Now",
-                                 command=self._enroll_fp,
-                                 bg="#E8500A", fg="white",
-                                 relief="flat", padx=10, pady=4)
-        self._fp_btn.pack(side="left", padx=(0, 8))
-        tk.Button(self._fp_frame, text="Skip",
-                  command=self._fp_skip,
-                  relief="flat", padx=8, pady=4,
-                  bg="#f0f0f0").pack(side="left")
-        self._fp_frame.grid_remove()   # hidden until enrollment succeeds
-
-        # Recent list
-        tk.Label(pane, text="Recent clients:",
-                 bg="white", font=("", 9)).grid(
-            row=8, column=0, columnspan=2, sticky="w", pady=(14, 2))
-
-        self._recent = ttk.Treeview(
-            pane,
-            columns=("name", "plan", "expires", "days"),
-            show="headings", height=5)
-        for col, txt, w in [
-            ("name", "Client", 120), ("plan", "Plan", 100),
-            ("expires", "Expires", 100), ("days", "Days left", 70)
-        ]:
-            self._recent.heading(col, text=txt)
-            self._recent.column(col, width=w, anchor="center")
-        self._recent.grid(row=9, column=0, columnspan=2,
-                          sticky="ew", pady=4)
-
-        self._load_subs()
-        self._load_recent()
-
-    # ── Right: actions ────────────────────────────────────────
-
-    def _build_action_panel(self):
-        pane = tk.LabelFrame(self, text="Time-In / Time-Out & Locker",
-                             bg="white", padx=14, pady=14)
-        pane.grid(row=1, column=1, sticky="nsew",
-                  padx=(8, 20), pady=10)
-        pane.columnconfigure(0, weight=1)
-
-        tk.Label(pane, text="Select client:",
-                 bg="white").pack(anchor="w")
-        self._att_var = tk.StringVar()
-        self._att_cb = ttk.Combobox(pane, textvariable=self._att_var,
-                                    state="readonly", width=26)
-        self._att_cb.pack(fill="x", pady=(2, 10))
-
-        btn_row = tk.Frame(pane, bg="white")
-        btn_row.pack(fill="x")
-        tk.Button(btn_row, text="Time-In",
-                  command=self._time_in,
+        # ── Top bar ────────────────────────────────────────────
+        bar = tk.Frame(self, bg="white")
+        bar.grid(row=0, column=0, sticky="ew", padx=16, pady=10)
+        tk.Label(bar, text="Attendance Logs",
+                 font=("", 14, "bold"), bg="white").pack(side="left")
+        tk.Button(bar, text="Refresh", command=self.refresh,
+                  relief="flat", padx=10).pack(side="right", padx=4)
+        tk.Button(bar, text="Delete Log", command=self._delete_log,
+                  bg="#8B1E1E", fg="white",
+                  relief="flat", padx=10).pack(side="right", padx=4)
+        tk.Button(bar, text="Time-Out", command=self._time_out,
+                  bg="#f0a030", relief="flat", padx=10).pack(side="right", padx=4)
+        tk.Button(bar, text="Time-In", command=self._time_in,
                   bg="#30a060", fg="white",
-                  padx=14, pady=8, relief="flat").pack(side="left", padx=4)
-        tk.Button(btn_row, text="Time-Out",
-                  command=self._time_out,
-                  bg="#f0a030", padx=14, pady=8,
-                  relief="flat").pack(side="left", padx=4)
-        tk.Button(btn_row, text="Refresh",
-                  command=self._load_clients,
-                  padx=10, pady=8,
-                  relief="flat").pack(side="right", padx=4)
+                  relief="flat", padx=10).pack(side="right", padx=4)
 
-        tk.Button(pane, text="Rent Locker",
-                  command=self._rent_locker,
-                  bg="#3C3489", fg="white",
-                  padx=12, pady=6,
-                  relief="flat").pack(fill="x", pady=(12, 4))
+        # ── Filter row ─────────────────────────────────────────
+        flt = tk.Frame(self, bg="white")
+        flt.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 6))
 
-        self._locker_lbl = tk.Label(pane, text="",
-                                    fg="gray", bg="white",
-                                    font=("", 9))
-        self._locker_lbl.pack(anchor="w")
+        tk.Label(flt, text="Client:", bg="white").pack(side="left")
+        self._client_var = tk.StringVar()
+        self._client_cb = make_searchable_combobox(
+            flt, self._client_var, [""], width=18)
+        self._client_cb.pack(side="left", padx=4)
 
-        self._att_status = tk.Label(pane, text="", fg="gray",
-                                    bg="white", wraplength=240,
-                                    font=("", 9))
-        self._att_status.pack(pady=(10, 0), anchor="w")
+        self._date_exact = tk.StringVar()
+        self._date_from  = tk.StringVar()
+        self._date_to    = tk.StringVar()
 
-        tk.Label(pane, text="Currently timed in:",
-                 bg="white", font=("", 9)).pack(anchor="w",
-                                                pady=(16, 2))
-        self._active_tree = ttk.Treeview(
-            pane,
-            columns=("name", "days"),
-            show="headings", height=7)
-        for col, txt, w in [("name", "Client", 160),
-                             ("days", "Days left", 80)]:
-            self._active_tree.heading(col, text=txt)
-            self._active_tree.column(col, width=w, anchor="center")
-        self._active_tree.pack(fill="both", expand=True, pady=4)
-        self._active_tree.tag_configure("warn",
-                                        foreground="#BA7517")
+        _make_date_entry(flt, self._date_exact, "Date:").pack(
+            side="left", padx=(8, 2))
+        _make_date_entry(flt, self._date_from, "From:").pack(
+            side="left", padx=(8, 2))
+        _make_date_entry(flt, self._date_to, "To:").pack(
+            side="left", padx=(4, 2))
 
-        self._load_clients()
+        tk.Button(flt, text="Filter", command=self._filter,
+                  relief="flat", padx=8).pack(side="left", padx=6)
+        tk.Button(flt, text="Clear", command=self.refresh,
+                  relief="flat", padx=8).pack(side="left")
 
-    # ── Queue polling ─────────────────────────────────────────
+        tk.Label(flt, text="Plan:", bg="white").pack(side="left", padx=(10, 0))
+        self._plan_filter_var = tk.StringVar(value="All Plans")
+        self._plan_filter_cb = ttk.Combobox(
+            flt, textvariable=self._plan_filter_var,
+            values=["All Plans"], state="readonly", width=16)
+        self._plan_filter_cb.pack(side="left", padx=4)
+        self._plan_filter_cb.bind("<<ComboboxSelected>>",
+                                  lambda _e: self._apply_plan_filter())
+
+        # ── Tree (extended multiselect + checkboxes) ───────────
+        cols = ("chk", "uid", "date", "client", "time_in", "time_out")
+        self._tree = ttk.Treeview(self, columns=cols,
+                                  show="headings", selectmode="extended")
+        for col, txt, w in [
+            ("chk",      "☐",         28),
+            ("uid",      "UID",        60),
+            ("date",     "Date",      100),
+            ("client",   "Client",    180),
+            ("time_in",  "Time In",    90),
+            ("time_out", "Time Out",   90),
+        ]:
+            self._tree.heading(col, text=txt,
+                               command=lambda c=col: self._sort(c))
+            self._tree.column(col, width=w, anchor="center")
+        self._tree.column("uid", width=0, minwidth=0, stretch=False)
+        self._tree.heading("uid", text="")
+        self._tree.column("chk", width=28, minwidth=28, stretch=False)
+        self._tree.heading("chk", text="☐", command=self._toggle_all)
+
+        self._checked: set[str] = set()   # iids of checked log rows
+
+        self._tree.tag_configure("date_group", background="#FFF0E8")
+        self._tree.tag_configure("still_in",   foreground="#1a8040")
+
+        self._tree.bind("<ButtonRelease-1>", self._on_click)
+
+        sb = ttk.Scrollbar(self, orient="vertical",
+                           command=self._tree.yview)
+        self._tree.configure(yscrollcommand=sb.set)
+        self._tree.grid(row=2, column=0, sticky="nsew",
+                        padx=(16, 0), pady=4)
+        sb.grid(row=2, column=1, sticky="ns", pady=4, padx=(0, 8))
+
+        self._status = tk.Label(self, text="", fg="gray",
+                                bg="white", anchor="w")
+        self._status.grid(row=3, column=0, sticky="ew",
+                          padx=16, pady=6)
+
+        self._sort_col: str | None = None
+        self._sort_asc = True
+
+        self.refresh()
+
+    # ---------------------------------------------------------
+    # Async helpers
+    # ---------------------------------------------------------
+
+    def _set_loading(self, value: bool, text: str | None = None):
+        self._loading = value
+        if text is not None:
+            self._status.config(text=text)
+
+    def _run_worker(self, target, name: str):
+        threading.Thread(target=target, daemon=True, name=name).start()
+
+    def _show_error(self, msg: str):
+        self._set_loading(False, msg)
 
     def _poll_att_queue(self):
-        """Refresh active clients list whenever a scan event occurs."""
+        """Poll att_queue for scanner-driven time-in/out events."""
         if self._att_queue:
             try:
                 while True:
                     self._att_queue.get_nowait()
-                    self._load_clients()
+                    # Only re-fetch if not already loading
+                    if not self._loading:
+                        self._filter()
             except Exception:
                 pass
         self.after(500, self._poll_att_queue)
 
-    # ── Loaders ───────────────────────────────────────────────
+    # ---------------------------------------------------------
+    # Refresh — today by default
+    # ---------------------------------------------------------
 
-    def _load_subs(self):
-        try:
-            self._subs = api.list_subscriptions()
-            names = [s["subscription_name"] for s in self._subs]
-            self._sub_cb["values"] = names
-            if names:
-                self._sub_cb.current(0)
-                self._show_sub_detail()
-            else:
-                self._enroll_status.config(
-                    text="No subscription plans found. Add plans first.",
-                    fg="orange")
-        except APIError as e:
-            self._enroll_status.config(text=f"Error loading plans: {e}",
-                                       fg="red")
-
-    def _show_sub_detail(self, _=None):
-        name = self._sub_var.get()
-        sub = next((s for s in self._subs
-                    if s["subscription_name"] == name), None)
-        if not sub:
+    def refresh(self):
+        if self._loading:
             return
-        trainer_txt = (f" | Trainer: {sub['trainer_duration_days']}d "
-                       f"(hardcap {sub['trainer_hardcap_days']}d)"
-                       if sub.get("has_trainer") else " | No trainer")
-        self._sub_detail.config(
-            text=f"{sub['duration_days']} days  |  "
-                 f"₱{sub['price']:.2f}{trainer_txt}")
+        today = date.today().isoformat()
+        self._date_exact.set(today)
+        self._date_from.set("")
+        self._date_to.set("")
+        self._client_var.set("")
+        self._sort_col = None
+        self._sort_asc = True
+        for c, lbl in {"date": "Date", "client": "Client",
+                       "time_in": "Time In", "time_out": "Time Out"}.items():
+            self._tree.heading(c, text=lbl)
+        self._set_loading(True, "Loading attendance...")
+        self._run_worker(self._refresh_worker, "att-refresh")
 
-    def _load_recent(self):
-        self._recent.delete(*self._recent.get_children())
+    def _refresh_worker(self):
         try:
-            clients = sorted(
-                api.list_clients(),
-                key=lambda c: c.get("last_enrolled_at") or "",
-                reverse=True)[:10]
-            for c in clients:
-                expires = (c.get("last_plan_expires_at") or "")[:10]
-                tag = "warn" if c["client_days_remaining"] <= 2 else ""
-                self._recent.insert("", "end", tags=(tag,), values=(
-                    c["client_name"],
-                    "",
-                    expires,
-                    c["client_days_remaining"],
-                ))
+            clients_list = api.list_clients()
+            try:
+                subs = api.list_subscriptions()
+            except Exception:
+                subs = []
+            today = date.today().isoformat()
+            logs  = api.list_attendance(date_exact=today)
+            self.after(0, lambda: self._refresh_complete(clients_list, logs, subs))
         except APIError as e:
-            self._att_status.config(text=f"Error loading clients: {e}",
-                                    fg="red")
-        self._recent.tag_configure("warn", foreground="#BA7517")
+            msg = str(e)
+            self.after(0, lambda msg=msg: self._show_error(msg))
+        except Exception as e:
+            msg = f"Error: {e}"
+            self.after(0, lambda msg=msg: self._show_error(msg))
 
-    def _load_clients(self):
-        try:
-            all_clients = api.list_clients()
-            names = [c["client_name"] for c in all_clients]
-            self._att_cb["values"] = names
-            if names and not self._att_var.get():
-                self._att_var.set(names[0])
+    def _refresh_complete(self, clients_list: list[dict], logs: list[dict],
+                          subs: list[dict] | None = None):
+        names = [c["client_name"] for c in clients_list]
+        update_searchable_combobox_values(self._client_cb, [""] + names)
+        self._client_cb.set("")
+        self._all_clients = clients_list
 
-            # Use list_active_clients() — always live, never cached.
-            # list_clients() from cache can be stale right after a time-in/out.
-            active = api.list_active_clients()
-            self._active_tree.delete(*self._active_tree.get_children())
-            for c in active:
-                tag = "warn" if c["client_days_remaining"] <= 2 else ""
-                self._active_tree.insert("", "end", tags=(tag,),
-                                         values=(c["client_name"],
-                                                 c["client_days_remaining"]))
-            avail = api.get_locker_availability()
-            self._locker_lbl.config(
-                text=f"Lockers: {avail['available']}/{avail['total']} available  "
-                     f"| ₱{avail['price']:.2f} / {avail['rental_days']} days")
-        except APIError as e:
-            self._att_status.config(text=str(e))
+        if subs is not None:
+            plan_names = sorted({s["subscription_name"] for s in subs})
+            self._plan_filter_cb["values"] = ["All Plans"] + plan_names
+            self._plan_filter_var.set("All Plans")
 
-    # ── Actions ───────────────────────────────────────────────
+        self._all_logs = logs
+        self._apply_plan_filter()
+        self._set_loading(False)
 
-    def _enroll_new(self):
-        name = self._entries["_name"].get().strip()
-        contact = self._entries["_contact"].get().strip()
-        address = self._entries["_address"].get().strip()
-        sub = self._sub_var.get()
-        if not name or not sub:
-            self._enroll_status.config(
-                text="Client name and subscription required.", fg="red")
-            return
-        try:
-            resp = api.create_client({
-                "client_name": name,
-                "contact_number": contact or None,
-                "address": address or None,
-                "subscription_name": sub,
-            })
-            if resp.get("warning"):
-                messagebox.showwarning("Note", resp["warning"])
-            expires = (resp["client"].get("last_plan_expires_at") or "")[:10]
-            self._enroll_status.config(
-                text=f"Enrolled '{name}' — {sub}  |  Expires: {expires}",
-                fg="#0F6E56")
-            # Store name for FP step before clearing fields
-            self._pending_fp_name = name
-            # Clear contact/address, keep name visible for context
-            self._entries["_contact"].delete(0, "end")
-            self._entries["_address"].delete(0, "end")
-            # Show FP prompt
-            self._fp_frame.grid()
-            self._fp_btn.config(state="normal",
-                                text="Enroll Fingerprint Now",
-                                bg="#E8500A")
-            self._load_recent()
-            self._load_clients()
-            if self._queue:
-                self._queue.put({
-                    "type": "time_in",
-                    "title": f"Welcome, {name}!",
-                    "subtitle": f"Package: {sub}",
-                })
-        except APIError as e:
-            self._enroll_status.config(text=str(e), fg="red")
+    def _apply_plan_filter(self):
+        """Filter the currently loaded logs to clients on the selected plan."""
+        plan = self._plan_filter_var.get()
+        if plan and plan != "All Plans":
+            matching_names = {
+                c["client_name"] for c in self._all_clients
+                if plan in (c.get("active_subscription_names") or [])
+            }
+            visible = [l for l in self._all_logs
+                      if l["client_name"] in matching_names]
+        else:
+            visible = self._all_logs
+        self._populate(visible)
 
-    def _re_enroll(self):
-        # Reset any pending FP state from a previous enrollment
-        self._fp_frame.grid_remove()
-        self._pending_fp_name = None
-        self._fp_btn.config(state="normal", text="Enroll Fingerprint Now")
-
-        name = self._entries["_name"].get().strip()
-        sub  = self._sub_var.get()
-        if not name or not sub:
-            self._enroll_status.config(
-                text="Client name and subscription required.", fg="red")
-            return
-
-        self._enroll_status.config(text="Re-enrolling...", fg="#E8500A")
-        import threading
+    def _refresh_client_cb(self):
+        """Refresh client dropdown live before time-in/out actions."""
         def _worker():
             try:
-                resp = api.re_enroll_client(name, sub)
-                self.after(0, lambda: self._re_enroll_done(name, sub, resp))
-            except APIError as e:
-                msg = str(e)
-                self.after(0, lambda msg=msg: self._enroll_status.config(
-                    text=msg, fg="red"))
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _re_enroll_done(self, name: str, sub: str, resp: dict):
-        expires = (resp["client"].get("last_plan_expires_at") or "")[:10]
-        self._enroll_status.config(
-            text=f"Re-enrolled '{name}' — {sub} | Expires: {expires}",
-            fg="#0F6E56")
-        if resp.get("warning"):
-            messagebox.showinfo("Note", resp["warning"])
-        self._entries["_name"].delete(0, "end")
-        self._load_recent()
-
-    def _enroll_fp(self):
-        name = getattr(self, "_pending_fp_name", None) \
-               or self._entries["_name"].get().strip()
-        if not name:
-            self._enroll_status.config(
-                text="Enroll a client first.", fg="red")
-            return
-        self._fp_btn.config(state="disabled", text="Scanning...")
-        self._enroll_status.config(
-            text=f"Place finger on scanner 3 times for '{name}'...",
-            fg="#E8500A")
-        import threading
-        self._poll_fp_progress()   # start polling on main thread before worker starts
-        threading.Thread(target=self._enroll_fp_worker,
-                         args=(name,), daemon=True).start()
-
-    def _enroll_fp_worker(self, name: str):
-        try:
-            api.enroll_fingerprint(name)
-            self.after(0, self._fp_success)
-        except Exception as e:
-            msg = str(e)
-            self.after(0, lambda: self._fp_error(msg))
-
-    def _poll_fp_progress(self):
-        """Start polling scan count in background thread."""
-        self._fp_polling = True
-        self._do_fp_poll()
-
-    def _do_fp_poll(self):
-        """Fire one background poll, schedule next if still enrolling."""
-        import threading
-        threading.Thread(target=self._fetch_progress, daemon=True).start()
-
-    def _fetch_progress(self):
-        """Background thread: fetch progress, post result to main thread."""
-        try:
-            n = api.get_enroll_progress().get("progress", 0)
-            self.after(0, lambda: self._apply_progress(n))
-            return
-        except Exception:
-            pass
-        # On error, keep polling if button still disabled
-        self.after(0, self._maybe_continue_poll)
-
-    def _apply_progress(self, n: int):
-        """Called on main thread with latest progress value. -1 = failed."""
-        if n == -1:
-            try:
-                self._enroll_status.config(
-                    text="Enrollment failed — scanner error. Try again.",
-                    fg="red")
-                self._fp_btn.config(state="normal", text="Try Again")
+                clients_list = api.list_clients()
+                names = [c["client_name"] for c in clients_list]
+                self.after(0, lambda: update_searchable_combobox_values(
+                    self._client_cb, [""] + names))
             except Exception:
                 pass
+        self._run_worker(_worker, "att-cb-refresh")
+
+    # ---------------------------------------------------------
+    # Filter
+    # ---------------------------------------------------------
+
+    def _filter(self):
+        if self._loading:
             return
-        if n > 0:
-            self._enroll_status.config(
-                text=f"Scan {n}/3 captured \u2014 lift finger, place again...",
-                fg="#E8500A")
-            self._fp_btn.config(text=f"Scanning... ({n}/3)")
-        elif n == -1:
-            return  # error handled by _fp_error
-        self._maybe_continue_poll()
+        client = self._client_var.get() or None
+        exact  = self._date_exact.get().strip() or None
+        dfrom  = self._date_from.get().strip() or None
+        dto    = self._date_to.get().strip() or None
+        self._set_loading(True, "Filtering...")
+        self._run_worker(
+            lambda: self._filter_worker(client, exact, dfrom, dto),
+            "att-filter",
+        )
 
-    def _maybe_continue_poll(self):
-        """Continue polling if enrollment is still running."""
+    def _filter_worker(self, client, exact, dfrom, dto):
         try:
-            if str(self._fp_btn.cget("state")) == "disabled":
-                self.after(200, self._do_fp_poll)
-        except Exception:
-            pass
+            logs = api.list_attendance(client_name=client,
+                                       date_exact=exact,
+                                       date_from=dfrom,
+                                       date_to=dto)
+            self.after(0, lambda: self._filter_complete(logs))
+        except APIError as e:
+            msg = str(e)
+            self.after(0, lambda msg=msg: self._show_error(msg))
+        except Exception as e:
+            msg = f"Error: {e}"
+            self.after(0, lambda msg=msg: self._show_error(msg))
 
-    def _fp_success(self):
-        self._enroll_status.config(
-            text="Fingerprint enrolled successfully.", fg="#0F6E56")
-        self._fp_frame.grid_remove()
-        self._entries["_name"].delete(0, "end")
-        self._pending_fp_name = None
+    def _filter_complete(self, logs: list[dict]):
+        self._all_logs = logs
+        # Reset sort state so arrows match the new data order
+        self._sort_col = None
+        self._sort_asc = True
+        for c, lbl in {"date": "Date", "client": "Client",
+                       "time_in": "Time In", "time_out": "Time Out"}.items():
+            self._tree.heading(c, text=lbl)
+        self._apply_plan_filter()
+        self._status.config(text=f"{len(logs)} record(s) — filtered")
+        self._set_loading(False)
 
-    def _fp_error(self, msg: str):
-        self._enroll_status.config(text=f"Failed: {msg}", fg="red")
-        self._fp_btn.config(state="normal", text="Try Again")
+    # ---------------------------------------------------------
+    # Populate — grouped by date, most-recent date first.
+    # Default (no sort col): still-timed-in first, then time_in desc.
+    # With sort col: sorts within each date group by that field.
+    # ---------------------------------------------------------
 
-    def _fp_skip(self):
-        self._fp_frame.grid_remove()
-        self._entries["_name"].delete(0, "end")
-        self._pending_fp_name = None
-        self._enroll_status.config(
-            text="Fingerprint skipped. Enroll later from client list.", fg="gray")
+    def _populate(self, logs: list):
+        self._tree.delete(*self._tree.get_children())
+        self._checked.clear()
+        self._tree.heading("chk", text="☐")
+
+        by_date: dict[str, list] = {}
+        for log in logs:
+            by_date.setdefault(log["log_date"], []).append(log)
+
+        field_map = {
+            "date":     "log_date",
+            "client":   "client_name",
+            "time_in":  "time_in",
+            "time_out": "time_out",
+        }
+
+        for d in sorted(by_date.keys(), reverse=True):
+            diid = f"d_{d}"
+            self._tree.insert("", "end", iid=diid,
+                              values=("☐", "", d, "", "", ""),
+                              tags=("date_group",))
+
+            group = by_date[d]
+            if self._sort_col and self._sort_col in field_map:
+                field = field_map[self._sort_col]
+                group = sorted(group,
+                               key=lambda l, f=field: l.get(f, "") or "",
+                               reverse=not self._sort_asc)
+            else:
+                # Default: most recent activity on top.
+                # Activity time = time_out if present, else time_in.
+                # Still-timed-in entries use time_in as activity time
+                # and sort above closed entries with the same time.
+                def _activity_key(l):
+                    t_out = l.get("time_out")
+                    t_in  = l.get("time_in") or ""
+                    activity = t_out if t_out else t_in
+                    # Negate string for descending: prefix "~" sorts after all
+                    # HH:MM strings so missing times sink to bottom
+                    return (
+                        activity or "",   # sort descending below
+                    )
+                group = sorted(group,
+                               key=_activity_key,
+                               reverse=True)
+
+            for log in group:
+                still = log.get("time_out") is None
+                tag   = "still_in" if still else ""
+                self._tree.insert(diid, "end",
+                                  iid=str(log["log_uid"]),
+                                  values=(
+                                      "☐",
+                                      log["log_uid"],
+                                      log["log_date"],
+                                      log["client_name"],
+                                      log["time_in"],
+                                      "—" if still else log.get("time_out", "—"),
+                                  ),
+                                  tags=(tag,))
+            self._tree.item(diid, open=True)
+
+        self._status.config(text=f"{len(logs)} record(s)")
+
+    # ---------------------------------------------------------
+    # Column sort — updates state, delegates to _populate
+    # ---------------------------------------------------------
+
+    def _sort(self, col: str):
+        if col == "chk":
+            return
+        if self._sort_col == col:
+            self._sort_asc = not self._sort_asc
+        else:
+            self._sort_col = col
+            self._sort_asc = True
+
+        label_map = {"date": "Date", "client": "Client",
+                     "time_in": "Time In", "time_out": "Time Out"}
+        for c, lbl in label_map.items():
+            arrow = (" ▲" if self._sort_asc else " ▼") if c == col else ""
+            self._tree.heading(c, text=lbl + arrow)
+
+        self._apply_plan_filter()
+
+    # ---------------------------------------------------------
+    # Checkbox logic
+    # ---------------------------------------------------------
+
+    def _on_click(self, event):
+        region = self._tree.identify_region(event.x, event.y)
+        col    = self._tree.identify_column(event.x)
+        iid    = self._tree.identify_row(event.y)
+        if not iid or region != "cell":
+            return
+        if col == "#1":   # chk column
+            if iid.startswith("d_"):
+                self._toggle_date_group(iid)
+            else:
+                self._toggle_row(iid)
+
+    def _toggle_row(self, iid: str):
+        if iid in self._checked:
+            self._checked.discard(iid)
+            self._tree.set(iid, "chk", "☐")
+        else:
+            self._checked.add(iid)
+            self._tree.set(iid, "chk", "☑")
+        self._sync_header()
+
+    def _toggle_date_group(self, diid: str):
+        children = self._tree.get_children(diid)
+        all_checked = all(c in self._checked for c in children)
+        if all_checked:
+            for c in children:
+                self._checked.discard(c)
+                self._tree.set(c, "chk", "☐")
+            self._tree.set(diid, "chk", "☐")
+        else:
+            for c in children:
+                self._checked.add(c)
+                self._tree.set(c, "chk", "☑")
+            self._tree.set(diid, "chk", "☑")
+        self._sync_header()
+
+    def _toggle_all(self):
+        all_rows = [
+            child
+            for diid in self._tree.get_children("")
+            for child in self._tree.get_children(diid)
+        ]
+        if all_rows and all(r in self._checked for r in all_rows):
+            # uncheck all
+            self._checked.clear()
+            for iid in self._tree.get_children(""):
+                self._tree.set(iid, "chk", "☐")
+                for c in self._tree.get_children(iid):
+                    self._tree.set(c, "chk", "☐")
+            self._tree.heading("chk", text="☐")
+        else:
+            # check all
+            for iid in self._tree.get_children(""):
+                self._tree.set(iid, "chk", "☑")
+                for c in self._tree.get_children(iid):
+                    self._checked.add(c)
+                    self._tree.set(c, "chk", "☑")
+            self._tree.heading("chk", text="☑")
+
+    def _sync_header(self):
+        all_rows = [
+            c for iid in self._tree.get_children("")
+            for c in self._tree.get_children(iid)
+        ]
+        if not all_rows:
+            return
+        if all(r in self._checked for r in all_rows):
+            self._tree.heading("chk", text="☑")
+        elif any(r in self._checked for r in all_rows):
+            self._tree.heading("chk", text="—")
+        else:
+            self._tree.heading("chk", text="☐")
+
+    # ---------------------------------------------------------
+    # Selected UIDs — uses checkbox state, falls back to tree selection
+    # ---------------------------------------------------------
+
+    def _selected_log_uids(self) -> list[int]:
+        # Prefer checked rows; fall back to tree selection if none checked
+        source = self._checked or {
+            iid for iid in self._tree.selection()
+            if not iid.startswith("d_")
+        }
+        uids = []
+        for iid in source:
+            try:
+                uids.append(int(iid))
+            except ValueError:
+                pass
+        return uids
+
+    # ---------------------------------------------------------
+    # Delete log(s)
+    # ---------------------------------------------------------
+
+    def _delete_log(self):
+        if self._loading:
+            return
+        uids = self._selected_log_uids()
+        if not uids:
+            messagebox.showwarning("Select", "Select one or more log entries to delete.")
+            return
+        noun = f"{len(uids)} log(s)" if len(uids) > 1 else f"log #{uids[0]}"
+        if not messagebox.askyesno(
+            "Confirm Delete",
+            f"Permanently delete {noun}?\n\n"
+            "If a client is currently timed-in on a deleted log their status will be reset.",
+        ):
+            return
+        self._set_loading(True, f"Deleting {len(uids)} log(s)...")
+        self._run_worker(lambda: self._delete_worker(uids), "att-delete")
+
+    def _delete_worker(self, uids: list[int]):
+        errors = []
+        for uid in uids:
+            try:
+                api.delete_attendance(uid)
+            except Exception as e:
+                errors.append(f"#{uid}: {e}")
+        msg = f"Deleted {len(uids) - len(errors)} log(s)."
+        if errors:
+            msg += "  Errors: " + "; ".join(errors)
+        self.after(0, lambda: self._after_delete(msg))
+
+    def _after_delete(self, msg: str):
+        self._status.config(text=msg)
+        self._set_loading(False)
+        # If any filter is active re-run it, otherwise fall back to today
+        if (self._client_var.get() or self._date_exact.get()
+                or self._date_from.get() or self._date_to.get()):
+            self._filter()
+        else:
+            self.refresh()
+
+    # ---------------------------------------------------------
+    # Time-In / Time-Out
+    # ---------------------------------------------------------
 
     def _time_in(self):
-        name = self._att_var.get()
-        if not name:
+        if self._loading:
             return
-        if self._queue:
-            self._queue.put({"type": "clear"})
-        try:
-            log = api.time_in(name)
-            msg = f"Time-In: {name} at {log['time_in']}"
-            self._att_status.config(text=msg, fg="#0F6E56")
-            if self._queue:
-                evt_type = "expiry_warn" if log.get("expiry_warning") else "time_in"
-                subtitle = (f"Timed in at {log['time_in']}"
-                            if evt_type == "time_in"
-                            else f"Timed in at {log['time_in']}  |  "
-                                 f"{log.get('days_remaining', 0)} day(s) remaining")
-                self._queue.put({
-                    "type": evt_type,
-                    "title": f"Welcome back, {name}",
-                    "subtitle": subtitle,
-                })
-            self._load_clients()
-        except APIError as e:
-            self._att_status.config(text=str(e), fg="red")
-            if self._queue and e.status_code == 403:
-                self._queue.put({
-                    "type": "expired",
-                    "title": "Subscription Expired",
-                    "subtitle": "Please see staff to renew.",
-                })
-
-    def _time_out(self):
-        name = self._att_var.get()
-        if not name:
-            return
-        try:
-            log = api.time_out(name)
-            self._att_status.config(
-                text=f"Time-Out: {name} at {log['time_out']}",
-                fg="#854F0B")
-            if self._queue:
-                self._queue.put({
-                    "type": "time_out",
-                    "title": f"Goodbye, {name}",
-                    "subtitle": f"Timed out at {log['time_out']}",
-                })
-            self._load_clients()
-        except APIError as e:
-            self._att_status.config(text=str(e), fg="red")
-
-    def _rent_locker(self):
-        name = self._att_var.get()
+        name = self._client_var.get()
         if not name:
             messagebox.showwarning("Select", "Select a client first.")
             return
-        import threading
-        def _worker():
-            try:
-                result = api.rent_locker(name)
-                self.after(0, lambda: self._rent_locker_done(name, result))
-            except APIError as e:
-                msg = str(e)
-                self.after(0, lambda msg=msg: messagebox.showerror(
-                    "Error", msg))
-        threading.Thread(target=_worker, daemon=True).start()
+        self._refresh_client_cb()
+        if self._queue:
+            self._queue.put({"type": "clear"})
+        self._set_loading(True, f"Timing in {name}...")
+        self._run_worker(lambda: self._time_in_worker(name), "att-time-in")
 
-    def _rent_locker_done(self, name: str, result: dict):
-        messagebox.showinfo(
-            "Locker Rented",
-            f"Locker #{result['locker_number']} assigned to {name}\n"
-            f"Days: {result['days_added']}  |  "
-            f"Expires: {result['expires_at']}")
-        self._load_clients()
+    def _time_in_worker(self, name: str):
+        try:
+            log = api.time_in(name)
+            self.after(0, lambda: self._after_time_in(name, log))
+        except APIError as e:
+            err = e
+            self.after(0, lambda e=err: self._time_in_error(name, e))
+        except Exception as e:
+            msg = str(e)
+            self.after(0, lambda msg=msg: self._show_error(msg))
 
-    def refresh(self):
-        self._load_subs()
-        self._load_recent()
-        self._load_clients()
+    def _after_time_in(self, name: str, log: dict):
+        self._set_loading(False)
+        messagebox.showinfo("Time-In", f"{name} timed in at {log['time_in']}")
+        if self._queue:
+            evt = "expiry_warn" if log.get("expiry_warning") else "time_in"
+            sub = (f"Timed in at {log['time_in']}  |  "
+                   f"{log.get('days_remaining', 0)} day(s) left"
+                   if evt == "expiry_warn"
+                   else f"Timed in at {log['time_in']}")
+            self._queue.put({"type": evt,
+                             "title": f"Welcome back, {name}",
+                             "subtitle": sub})
+        self._filter()
+
+    def _time_in_error(self, name: str, e: APIError):
+        self._set_loading(False)
+        if self._queue and e.status_code == 403:
+            self._queue.put({"type": "expired",
+                             "title": "Subscription Expired",
+                             "subtitle": "Please see staff to renew."})
+        messagebox.showerror("Error", str(e))
+
+    def _time_out(self):
+        if self._loading:
+            return
+        name = self._client_var.get()
+        if not name:
+            messagebox.showwarning("Select", "Select a client first.")
+            return
+        self._refresh_client_cb()
+        self._set_loading(True, f"Timing out {name}...")
+        self._run_worker(lambda: self._time_out_worker(name), "att-time-out")
+
+    def _time_out_worker(self, name: str):
+        try:
+            log = api.time_out(name)
+            self.after(0, lambda: self._after_time_out(name, log))
+        except APIError as e:
+            msg = str(e)
+            self.after(0, lambda msg=msg: self._show_error(msg))
+        except Exception as e:
+            msg = str(e)
+            self.after(0, lambda msg=msg: self._show_error(msg))
+
+    def _after_time_out(self, name: str, log: dict):
+        self._set_loading(False)
+        messagebox.showinfo("Time-Out", f"{name} timed out at {log['time_out']}")
+        if self._queue:
+            self._queue.put({"type": "time_out",
+                             "title": f"Goodbye, {name}",
+                             "subtitle": f"Timed out at {log['time_out']}"})
+        self._filter()

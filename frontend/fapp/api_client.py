@@ -26,6 +26,16 @@ class APIError(Exception):
         self.status_code = status_code
 
 
+class NetworkError(APIError):
+    """
+    Raised when the backend process is unreachable at the network level
+    (connection refused, DNS failure, timeout).  Distinct from APIError
+    so callers can show "No connection" instead of a generic server error.
+    """
+    def __init__(self, message: str = "Cannot reach server."):
+        super().__init__(message, status_code=0)
+
+
 class DataCache:
     """
     Thread-safe key-value cache with TTL for Firestore collection data.
@@ -118,6 +128,7 @@ class APIClient:
     """
 
     _on_unauthorized = None   # set by frontend_main after login
+    _on_network_error = None  # set by frontend_main after login
 
     @classmethod
     def set_unauthorized_handler(cls, fn):
@@ -126,6 +137,24 @@ class APIClient:
     @classmethod
     def clear_unauthorized_handler(cls):
         cls._on_unauthorized = None
+
+    @classmethod
+    def set_network_error_handler(cls, fn):
+        """fn(message: str) is called on the Tkinter main thread whenever
+        a request exhausts its retries due to a network-level failure."""
+        cls._on_network_error = fn
+
+    @classmethod
+    def clear_network_error_handler(cls):
+        cls._on_network_error = None
+
+    @classmethod
+    def _fire_network_error(cls, message: str):
+        if cls._on_network_error:
+            try:
+                cls._on_network_error(message)
+            except Exception:
+                pass
 
     def __init__(self):
         self._token: str | None = None
@@ -153,6 +182,17 @@ class APIClient:
             try:
                 result = fn()
                 self.cache.set(key, result)
+            except NetworkError as exc:
+                # Surface this to the UI instead of silently hiding it —
+                # an empty list looks identical to "no data" otherwise.
+                self._fire_network_error(str(exc))
+                self.cache.set(
+                    key,
+                    [] if key not in (
+                        "locker_availability",
+                        "locker_settings",
+                    ) else {}
+                )
             except Exception:
                 # On failure set empty so views don't wait forever
                 self.cache.set(
@@ -228,15 +268,44 @@ class APIClient:
 
     # ── Auth ─────────────────────────────────────────────────
 
+    def ping(self) -> tuple[bool, str]:
+        """
+        Returns (reachable, firebase_status).
+        firebase_status is one of: "ok", "credentials_missing", "error",
+        "unknown" — "unknown" is also used when the backend is unreachable.
+        Used by the login page poller; does NOT require authentication.
+        """
+        try:
+            r = self._session.get(
+                f"{BASE_URL.rsplit('/api', 1)[0]}/health",
+                timeout=(3, 5),
+            )
+            try:
+                fb = r.json().get("firebase", "unknown")
+            except Exception:
+                fb = "unknown"
+            return True, fb
+        except (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+        ):
+            return False, "unknown"
+
     def login(self, username: str, password: str) -> None:
-        r = self._session.post(
-            f"{BASE_URL}/auth/login",
-            data={
-                "username": username,
-                "password": password,
-            },
-            timeout=DEFAULT_TIMEOUT,
-        )
+        try:
+            r = self._session.post(
+                f"{BASE_URL}/auth/login",
+                data={
+                    "username": username,
+                    "password": password,
+                },
+                timeout=DEFAULT_TIMEOUT,
+            )
+        except (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+        ) as exc:
+            raise NetworkError("Cannot reach server. Check that the backend is running.") from exc
 
         self._raise(r)
 
@@ -251,6 +320,54 @@ class APIClient:
             daemon=True,
             name="prefetch-all",
         ).start()
+
+    def local_admin_login(self, username: str, password: str) -> None:
+        """
+        Bootstrap login used only to unlock the Firebase setup panel when
+        Firestore is unreachable.  Does not trigger prefetch — there is no
+        normal session to start, just a short-lived token for one action.
+        """
+        try:
+            r = self._session.post(
+                f"{BASE_URL}/auth/local-login",
+                data={"username": username, "password": password},
+                timeout=DEFAULT_TIMEOUT,
+            )
+        except (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+        ) as exc:
+            raise NetworkError("Cannot reach server. Check that the backend is running.") from exc
+
+        self._raise(r)
+        body = r.json()
+        self._local_admin_token = body["access_token"]
+
+    def apply_firebase_config(self, json_path: str) -> dict:
+        """
+        Uploads a Firebase service-account JSON file using the local-admin
+        token obtained from local_admin_login().  Raises APIError with the
+        backend's detail message on validation or connection failure.
+        """
+        if not getattr(self, "_local_admin_token", None):
+            raise APIError("Not authenticated as local admin.")
+
+        try:
+            with open(json_path, "rb") as f:
+                r = self._session.post(
+                    f"{BASE_URL}/admin/apply-firebase-config",
+                    files={"file": ("firebase_credentials.json", f, "application/json")},
+                    headers={"Authorization": f"Bearer {self._local_admin_token}"},
+                    timeout=(5, 20),
+                )
+        except (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+        ) as exc:
+            raise NetworkError("Cannot reach server. Check that the backend is running.") from exc
+
+        self._raise(r)
+        return r.json()
 
     def logout(self) -> None:
         self._token = None
@@ -425,6 +542,7 @@ class APIClient:
         """
         Blocks up to ~32 s waiting for a finger to be physically placed.
         Returns (touched: bool, scanner_available: bool).
+        Raises NetworkError if the backend is unreachable.
         """
         try:
             r = self._session.post(
@@ -436,17 +554,23 @@ class APIClient:
             if r.status_code == 200:
                 data = r.json()
                 return data.get("touched", False), data.get("scanner_available", True)
+            return False, False
+        except (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ChunkedEncodingError,
+        ) as exc:
+            raise NetworkError() from exc
         except Exception:
-            pass
-        return False, False
+            return False, False
 
     def fingerprint_scan(self):
         """
         Blocks up to ~10 s for next finger scan result.
         Returns display event dict or None on error.
         Read timeout must exceed scanner's 7 s capture window.
+        Raises NetworkError if the backend is unreachable.
         """
-
         try:
             r = self._session.post(
                 f"{BASE_URL}/attendance/scan",
@@ -454,14 +578,17 @@ class APIClient:
                 headers=self._headers(),
                 timeout=(5, 12),
             )
-
             if r.status_code == 200:
                 return r.json()
-
+            return None
+        except (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ChunkedEncodingError,
+        ) as exc:
+            raise NetworkError() from exc
         except Exception:
-            pass
-
-        return None
+            return None
 
     # ── Items ─────────────────────────────────────────────────
 
@@ -642,10 +769,12 @@ class APIClient:
     def get_daily_report(self, date_str):
         return self._get(f"/reports/daily/{date_str}")
 
-    def get_daily_pdf(self, date_str) -> bytes:
+    def get_daily_pdf(self, date_str, plan: str | None = None) -> bytes:
+        params = {"plan": plan} if plan else None
         r = self._session.get(
             f"{BASE_URL}/reports/daily/{date_str}/pdf",
             headers=self._headers(),
+            params=params,
             timeout=DEFAULT_TIMEOUT,
         )
         self._raise(r)
@@ -654,10 +783,27 @@ class APIClient:
     def get_monthly_report(self, year, month):
         return self._get(f"/reports/monthly/{year}/{month}")
 
-    def get_monthly_pdf(self, year, month) -> bytes:
+    def get_monthly_pdf(self, year, month, plan: str | None = None) -> bytes:
+        params = {"plan": plan} if plan else None
         r = self._session.get(
             f"{BASE_URL}/reports/monthly/{year}/{month}/pdf",
             headers=self._headers(),
+            params=params,
+            timeout=DEFAULT_TIMEOUT,
+        )
+        self._raise(r)
+        return r.content
+
+    def get_custom_report(self, start_str: str, end_str: str):
+        return self._get(f"/reports/custom/{start_str}/{end_str}")
+
+    def get_custom_pdf(self, start_str: str, end_str: str,
+                       plan: str | None = None) -> bytes:
+        params = {"plan": plan} if plan else None
+        r = self._session.get(
+            f"{BASE_URL}/reports/custom/{start_str}/{end_str}/pdf",
+            headers=self._headers(),
+            params=params,
             timeout=DEFAULT_TIMEOUT,
         )
         self._raise(r)
@@ -673,51 +819,77 @@ class APIClient:
             "Authorization": f"Bearer {self._token}"
         }
 
+    def _request(self, fn, retries: int = 3, backoff: float = 1.5):
+        """
+        Calls fn() (a lambda making one requests call) with retry on
+        transient network failures. Raises NetworkError after all retries
+        are exhausted; re-raises APIError (HTTP 4xx/5xx) immediately
+        without retrying, since those are not network issues.
+        """
+        for attempt in range(retries):
+            try:
+                return fn()
+            except (
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+                requests.exceptions.ChunkedEncodingError,
+            ):
+                if attempt < retries - 1:
+                    time.sleep(backoff * (attempt + 1))
+                continue
+
+        err = NetworkError(
+            f"Cannot reach server after {retries} attempts. "
+            "Check that the backend is running."
+        )
+        self._fire_network_error(str(err))
+        raise err
+
     def _get(self, path):
-        r = self._session.get(
+        r = self._request(lambda: self._session.get(
             f"{BASE_URL}{path}",
             headers=self._headers(),
             timeout=DEFAULT_TIMEOUT,
-        )
+        ))
         self._raise(r)
         return r.json()
 
     def _get_params(self, path, params):
-        r = self._session.get(
+        r = self._request(lambda: self._session.get(
             f"{BASE_URL}{path}",
             headers=self._headers(),
             params=params,
             timeout=DEFAULT_TIMEOUT,
-        )
+        ))
         self._raise(r)
         return r.json()
 
     def _post(self, path, body):
-        r = self._session.post(
+        r = self._request(lambda: self._session.post(
             f"{BASE_URL}{path}",
             json=body,
             headers=self._headers(),
             timeout=DEFAULT_TIMEOUT,
-        )
+        ))
         self._raise(r)
         return r.json()
 
     def _patch(self, path, body):
-        r = self._session.patch(
+        r = self._request(lambda: self._session.patch(
             f"{BASE_URL}{path}",
             json=body,
             headers=self._headers(),
             timeout=DEFAULT_TIMEOUT,
-        )
+        ))
         self._raise(r)
         return r.json()
 
     def _delete(self, path):
-        r = self._session.delete(
+        r = self._request(lambda: self._session.delete(
             f"{BASE_URL}{path}",
             headers=self._headers(),
             timeout=DEFAULT_TIMEOUT,
-        )
+        ))
         self._raise(r)
         try:
             return r.json()
@@ -725,11 +897,11 @@ class APIClient:
             return {}
 
     def _delete_json(self, path):
-        r = self._session.delete(
+        r = self._request(lambda: self._session.delete(
             f"{BASE_URL}{path}",
             headers=self._headers(),
             timeout=DEFAULT_TIMEOUT,
-        )
+        ))
         self._raise(r)
         return r.json()
 

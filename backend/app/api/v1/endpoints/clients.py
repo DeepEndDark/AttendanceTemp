@@ -22,6 +22,7 @@ def _recalc_totals(client_name: str) -> dict:
     total_days    = 0
     total_trainer = 0
     expiry_dates  = []
+    plan_names    = []
     for s in active:
         d = s.to_dict()
         total_days    += d.get("days_remaining", 0)
@@ -29,10 +30,14 @@ def _recalc_totals(client_name: str) -> dict:
         exp = d.get("expires_at", "")
         if exp:
             expiry_dates.append(exp)
+        name = d.get("subscription_name")
+        if name and name not in plan_names:
+            plan_names.append(name)
     return {
         "client_days_remaining":         total_days,
         "client_trainer_days_remaining": total_trainer,
         "last_plan_expires_at":          max(expiry_dates) if expiry_dates else None,
+        "active_subscription_names":    plan_names,
     }
 
 
@@ -63,6 +68,7 @@ def _doc_to_read(d: dict) -> ClientRead:
         created_at=d.get("created_at"),
         last_enrolled_at=d.get("last_enrolled_at"),
         last_plan_expires_at=d.get("last_plan_expires_at"),
+        active_subscription_names=d.get("active_subscription_names", []),
         fingerprint_enrolled=bool(d.get("fingerprint_template")),
     )
 
@@ -189,6 +195,7 @@ def create_client(payload: ClientCreate,
         "created_at":                    now.isoformat(),
         "last_enrolled_at":              now.isoformat(),
         "last_plan_expires_at":          expires,
+        "active_subscription_names":    [payload.subscription_name],
         "fingerprint_template":          None,
     }
     ref.set(client_data)
