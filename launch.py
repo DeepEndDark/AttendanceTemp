@@ -136,6 +136,23 @@ def _wait_for_backend(timeout: int = 30) -> bool:
     return False
 
 
+def _set_windows_app_id():
+    """
+    Windows groups taskbar entries by "Application User Model ID". Without
+    an explicit one, a PyInstaller-frozen Python app can get grouped under
+    the generic Python identity and show the Python icon instead of ours.
+    Must be called before any Tk window is created.
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "tigersfitnessgym.attendance.sales.v1"
+            )
+        except Exception:
+            pass
+
+
 # ── Splash ───────────────────────────────────────────────────
 
 class _Splash(tk.Tk):
@@ -177,49 +194,78 @@ class _Splash(tk.Tk):
 # ── Entry point ──────────────────────────────────────────────
 
 def main():
+    _set_windows_app_id()
+
     t = threading.Thread(
         target=_run_server,
         daemon=True,
         name="BackendServer",
     )
-
     t.start()
 
     splash = _Splash()
-    splash.update()
 
-    ready = _wait_for_backend(timeout=30)
+    # _wait_for_backend() is a real blocking loop (up to 30s, sleeping
+    # 0.4s between polls). Calling it directly on the main thread — as a
+    # previous version of this function did — leaves the splash window's
+    # Tk event loop not running for that whole duration: no redraws, no
+    # responding to clicks/drags, which Windows reports as "Not Responding"
+    # even though the app is working fine in the background.
+    #
+    # Instead, run the wait in a background thread and poll its result
+    # via splash.after(), so splash.mainloop() keeps the window responsive
+    # the entire time.
+    result: dict[str, bool | None] = {"ready": None}
 
-    try:
-        splash.destroy()
-    except Exception:
-        pass
+    def wait_worker():
+        result["ready"] = _wait_for_backend(timeout=30)
 
-    if not ready:
-        if _SERVER_ERROR:
-            detail = "\n\nError:\n" + _SERVER_ERROR[0]
-        else:
-            detail = (
-                "\n\nServer did not respond in 30 seconds.\n"
-                "Check that port 8000 is free and "
-                "firebase_credentials.json is present.\n\n"
-                f"See server.log in:\n{EXE_DIR}"
+    threading.Thread(
+        target=wait_worker,
+        daemon=True,
+        name="BackendWaiter",
+    ).start()
+
+    def poll_backend_result():
+        if result["ready"] is None:
+            splash.after(100, poll_backend_result)
+            return
+
+        ready = result["ready"]
+
+        try:
+            splash.destroy()
+        except Exception:
+            pass
+
+        if not ready:
+            if _SERVER_ERROR:
+                detail = "\n\nError:\n" + _SERVER_ERROR[0]
+            else:
+                detail = (
+                    "\n\nServer did not respond in 30 seconds.\n"
+                    "Check that port 8000 is free and "
+                    "firebase_credentials.json is present.\n\n"
+                    f"See server.log in:\n{EXE_DIR}"
+                )
+
+            root = tk.Tk()
+            root.withdraw()
+
+            messagebox.showerror(
+                "Startup Failed",
+                "The backend could not start." + detail,
             )
 
-        root = tk.Tk()
-        root.withdraw()
+            root.destroy()
+            sys.exit(1)
 
-        messagebox.showerror(
-            "Startup Failed",
-            "The backend could not start." + detail,
-        )
+        from frontend_main import App
 
-        root.destroy()
-        sys.exit(1)
+        App().mainloop()
 
-    from frontend_main import App
-
-    App().mainloop()
+    splash.after(100, poll_backend_result)
+    splash.mainloop()
 
 
 if __name__ == "__main__":
