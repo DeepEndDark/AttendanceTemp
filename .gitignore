@@ -1,3 +1,5 @@
 firebase_credentials.json
 dist.zip
 dist/firebase_credentials.json
+.venv
+backed
