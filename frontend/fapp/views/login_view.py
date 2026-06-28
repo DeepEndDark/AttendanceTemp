@@ -22,7 +22,8 @@ class LoginView(tk.Frame):
         super().__init__(master, bg="white")
         self.on_success = on_success
         self._destroyed       = False
-        self._network_ok      = False   # backend process reachable
+        self._backend_reachable = False  # backend process reachable
+        self._network_ok      = False    # reachable AND firebase ok — login-eligible
         self._firebase_status = "unknown"
         self._poll_job_id     = None
         self._setup_visible   = False
@@ -115,23 +116,23 @@ class LoginView(tk.Frame):
         if self._destroyed:
             return
 
-        if reachable and not self._network_ok:
-            self._network_ok = True
+        # ── Backend reachability banner ───────────────────────
+        if reachable and not self._backend_reachable:
+            self._backend_reachable = True
             self._net_frame.grid_remove()
-            self._sign_in_btn.config(state="normal")
             self._status.config(text="")
-        elif not reachable and self._network_ok:
-            self._network_ok = False
+        elif not reachable and self._backend_reachable:
+            self._backend_reachable = False
             self._net_label.config(text="⚠  Backend unreachable — retrying…")
             self._net_frame.grid()
-            self._sign_in_btn.config(state="disabled")
             self._status.config(
                 text="Cannot connect to server. Is the backend running?", fg="red")
-        elif not reachable and not self._network_ok:
+        elif not reachable and not self._backend_reachable:
             dots = len(self._net_label.cget("text")) % 3 + 1
             self._net_label.config(
                 text=f"⚠  Backend unreachable — retrying{'.' * dots}")
 
+        # ── Firebase configuration banner ─────────────────────
         self._firebase_status = firebase_status
         if reachable and firebase_status == "credentials_missing":
             self._fb_frame.grid()
@@ -139,6 +140,16 @@ class LoginView(tk.Frame):
             self._fb_frame.grid_remove()
             if self._setup_visible:
                 self._close_admin_setup(refreshed_ok=True)
+
+        # ── Sign-in button ─────────────────────────────────────
+        # Reachable alone isn't enough — a login attempt will still fail
+        # (now as a clean 503, previously a raw 500) if Firestore itself
+        # isn't usable yet. Only enable Sign In once both are true; the
+        # Admin Setup link inside the Firebase banner remains the path
+        # forward when credentials are missing/erroring.
+        can_login = reachable and firebase_status == "ok"
+        self._network_ok = can_login
+        self._sign_in_btn.config(state="normal" if can_login else "disabled")
 
         self._poll_job_id = self.after(POLL_INTERVAL_MS, self._start_network_poller)
 
@@ -155,7 +166,13 @@ class LoginView(tk.Frame):
 
     def _login(self):
         if not self._network_ok:
-            self._status.config(text="Backend is not reachable. Please wait.", fg="red")
+            if self._backend_reachable and self._firebase_status != "ok":
+                self._status.config(
+                    text="Database not configured yet. See Admin Setup above.",
+                    fg="red")
+            else:
+                self._status.config(
+                    text="Backend is not reachable. Please wait.", fg="red")
             return
 
         u = self._user.get().strip()
@@ -201,6 +218,7 @@ class LoginView(tk.Frame):
     def _login_network_error(self):
         if self._destroyed:
             return
+        self._backend_reachable = False
         self._network_ok = False
         self._net_label.config(text="⚠  Lost connection during login — retrying…")
         self._net_frame.grid()

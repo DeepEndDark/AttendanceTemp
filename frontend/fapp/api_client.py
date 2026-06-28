@@ -560,7 +560,9 @@ class APIClient:
             requests.exceptions.Timeout,
             requests.exceptions.ChunkedEncodingError,
         ) as exc:
-            raise NetworkError() from exc
+            err = NetworkError("Cannot reach server. Scanner connection lost.")
+            self._fire_network_error(str(err))
+            raise err from exc
         except Exception:
             return False, False
 
@@ -586,7 +588,9 @@ class APIClient:
             requests.exceptions.Timeout,
             requests.exceptions.ChunkedEncodingError,
         ) as exc:
-            raise NetworkError() from exc
+            err = NetworkError("Cannot reach server. Scanner connection lost.")
+            self._fire_network_error(str(err))
+            raise err from exc
         except Exception:
             return None
 
@@ -771,12 +775,12 @@ class APIClient:
 
     def get_daily_pdf(self, date_str, plan: str | None = None) -> bytes:
         params = {"plan": plan} if plan else None
-        r = self._session.get(
+        r = self._request(lambda: self._session.get(
             f"{BASE_URL}/reports/daily/{date_str}/pdf",
             headers=self._headers(),
             params=params,
             timeout=DEFAULT_TIMEOUT,
-        )
+        ))
         self._raise(r)
         return r.content
 
@@ -785,12 +789,12 @@ class APIClient:
 
     def get_monthly_pdf(self, year, month, plan: str | None = None) -> bytes:
         params = {"plan": plan} if plan else None
-        r = self._session.get(
+        r = self._request(lambda: self._session.get(
             f"{BASE_URL}/reports/monthly/{year}/{month}/pdf",
             headers=self._headers(),
             params=params,
             timeout=DEFAULT_TIMEOUT,
-        )
+        ))
         self._raise(r)
         return r.content
 
@@ -800,12 +804,12 @@ class APIClient:
     def get_custom_pdf(self, start_str: str, end_str: str,
                        plan: str | None = None) -> bytes:
         params = {"plan": plan} if plan else None
-        r = self._session.get(
+        r = self._request(lambda: self._session.get(
             f"{BASE_URL}/reports/custom/{start_str}/{end_str}/pdf",
             headers=self._headers(),
             params=params,
             timeout=DEFAULT_TIMEOUT,
-        )
+        ))
         self._raise(r)
         return r.content
 
@@ -819,24 +823,54 @@ class APIClient:
             "Authorization": f"Bearer {self._token}"
         }
 
-    def _request(self, fn, retries: int = 3, backoff: float = 1.5):
+    def _request(self, fn, retries: int = 3, backoff: float = 1.5,
+                 idempotent: bool = True):
         """
         Calls fn() (a lambda making one requests call) with retry on
         transient network failures. Raises NetworkError after all retries
         are exhausted; re-raises APIError (HTTP 4xx/5xx) immediately
         without retrying, since those are not network issues.
+
+        idempotent=True (GET): safe to retry on BOTH ConnectionError and
+        Timeout — a read can be repeated with no side effect either way.
+
+        idempotent=False (POST/PATCH/DELETE): a ConnectionError means the
+        request almost certainly never reached the server (the TCP
+        handshake itself failed), so retrying is safe. But a Timeout means
+        the request WAS sent — the server may have already processed the
+        write and we simply didn't get the response in time. Blindly
+        retrying in that case risks double-submitting (e.g. a sale closed
+        twice, a subscription re-enrolled twice). So for non-idempotent
+        calls, a Timeout is NOT retried automatically — it's raised
+        immediately as a distinct, clearly-worded error so the person can
+        check the result (e.g. refresh the list) before deciding to retry
+        manually, rather than the app silently resending on their behalf.
         """
+        retryable_on_timeout = (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ChunkedEncodingError,
+        ) if idempotent else (
+            requests.exceptions.ConnectionError,
+        )
+
         for attempt in range(retries):
             try:
                 return fn()
-            except (
-                requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout,
-                requests.exceptions.ChunkedEncodingError,
-            ):
+            except retryable_on_timeout:
                 if attempt < retries - 1:
                     time.sleep(backoff * (attempt + 1))
                 continue
+            except requests.exceptions.Timeout as exc:
+                # Non-idempotent + timeout: do NOT retry — the write may
+                # have already gone through. Surface this distinctly.
+                err = NetworkError(
+                    "The server didn't respond in time. Your last action "
+                    "may or may not have been saved — please check before "
+                    "retrying to avoid duplicating it."
+                )
+                self._fire_network_error(str(err))
+                raise err from exc
 
         err = NetworkError(
             f"Cannot reach server after {retries} attempts. "
@@ -870,7 +904,7 @@ class APIClient:
             json=body,
             headers=self._headers(),
             timeout=DEFAULT_TIMEOUT,
-        ))
+        ), idempotent=False)
         self._raise(r)
         return r.json()
 
@@ -880,7 +914,7 @@ class APIClient:
             json=body,
             headers=self._headers(),
             timeout=DEFAULT_TIMEOUT,
-        ))
+        ), idempotent=False)
         self._raise(r)
         return r.json()
 
@@ -889,7 +923,7 @@ class APIClient:
             f"{BASE_URL}{path}",
             headers=self._headers(),
             timeout=DEFAULT_TIMEOUT,
-        ))
+        ), idempotent=False)
         self._raise(r)
         try:
             return r.json()
@@ -901,7 +935,7 @@ class APIClient:
             f"{BASE_URL}{path}",
             headers=self._headers(),
             timeout=DEFAULT_TIMEOUT,
-        ))
+        ), idempotent=False)
         self._raise(r)
         return r.json()
 

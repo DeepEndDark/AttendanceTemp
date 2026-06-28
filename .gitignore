@@ -1,5 +1,24 @@
+
+# Secrets and runtime-generated credentials — never commit these.
+# .env is generated automatically on first run by config.py with a fresh
+# random SECRET_KEY; firebase_credentials.json is the Firebase service
+# account key. Both must stay local-only.
+.env
+backend/.env
 firebase_credentials.json
-dist.zip
+backend/firebase_credentials.json
 dist/firebase_credentials.json
+dist/.env
 .venv
-backed
+
+# Logs
+server.log
+dist/server.log
+*.log
+
+# Build artifacts
+dist.zip
+build/
+dist/
+__pycache__/
+*.pyc

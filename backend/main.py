@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from app.api.v1.router import api_router
 import asyncio
 import logging
@@ -83,6 +84,67 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix="/api/v1")
+
+
+@app.exception_handler(Exception)
+async def firestore_connectivity_handler(request: Request, exc: Exception):
+    """
+    Distinguishes "Firestore/network is temporarily unreachable" from a real
+    application bug, mid-session — not just at startup.
+
+    _startup() in this file only handles missing credentials at boot time;
+    it says nothing about Firestore having a transient outage once the
+    backend is already serving live traffic (a real possibility for a
+    cloud-hosted DB, separate from the local network dropping). Without
+    this handler, any such failure bubbles up as a raw 500 with a Python
+    traceback — which the frontend's _request() retry wrapper does NOT
+    treat as retriable (it only retries on connection-level failures, not
+    on a "successful" HTTP response that happens to carry a 500 body).
+
+    Returning 503 here lets the frontend recognize this distinctly if it
+    chooses to, and gives the person a clean message instead of a stack
+    trace, without masking genuine application bugs (those still surface
+    as 500 via FastAPI's default handling for exception types not listed
+    below).
+    """
+    is_connectivity_issue = False
+
+    try:
+        from google.api_core import exceptions as gae
+        if isinstance(exc, (gae.GoogleAPIError, gae.RetryError)):
+            is_connectivity_issue = True
+    except ImportError:
+        pass
+
+    if not is_connectivity_issue:
+        try:
+            import grpc
+            if isinstance(exc, grpc.RpcError):
+                is_connectivity_issue = True
+        except ImportError:
+            pass
+
+    if not is_connectivity_issue:
+        # Not a connectivity issue — let FastAPI's default handling apply
+        # (re-raising here would lose the original traceback in some
+        # ASGI server configurations, so log and return 500 explicitly).
+        log.exception("Unhandled exception in %s", request.url.path)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"Internal server error: {exc}"},
+        )
+
+    log.error(
+        "Firestore/network connectivity error in %s: %s: %s",
+        request.url.path, type(exc).__name__, exc,
+    )
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": "Database temporarily unreachable. Please try again "
+                      "in a few seconds."
+        },
+    )
 
 
 @app.get("/health", tags=["meta"])

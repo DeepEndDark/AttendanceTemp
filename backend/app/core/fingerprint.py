@@ -30,14 +30,22 @@ PROBABILITY_ONE = 0x7FFFFFFF
 MATCH_THRESHOLD = int(PROBABILITY_ONE / 100000)
 
 _SDK_CANDIDATES = [
+    # In a PyInstaller --onefile build, binaries=[(str(DPU_DLL), ".")] in
+    # launch.spec extracts DPUruNet.dll to the ROOT of sys._MEIPASS at
+    # runtime — not next to sys.executable. Without this entry, the DLL
+    # that the spec correctly bundles is never actually found unless a
+    # real system SDK install also happens to exist on the machine.
+    getattr(sys, "_MEIPASS", ""),
+    os.path.dirname(sys.executable),
+    os.path.dirname(os.path.abspath(__file__)),
     r"C:\Program Files\DigitalPersona\U.are.U SDK\Windows\Bin",
     r"C:\Program Files\Crossmatch\U.are.U SDK\Windows\Bin",
     r"C:\Program Files (x86)\DigitalPersona\U.are.U SDK\Windows\Bin",
     r"C:\Program Files (x86)\Crossmatch\U.are.U SDK\Windows\Bin",
     r"C:\Program Files\DigitalPersona\U.are.U SDK\Windows\Lib\DotNET",
-    os.path.dirname(sys.executable),
-    os.path.dirname(os.path.abspath(__file__)),
 ]
+_SDK_CANDIDATES = [p for p in _SDK_CANDIDATES if p]  # drop empty strings
+# (getattr returns "" outside a frozen build, when _MEIPASS doesn't exist)
 
 
 def _find_sdk_dir() -> Optional[str]:

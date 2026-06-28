@@ -51,6 +51,22 @@ _SERVER_ERROR: list[str] = []
 # ── Backend thread ───────────────────────────────────────────
 
 def _run_server():
+    """
+    Runs uvicorn in a daemon thread.
+
+    IMPORTANT: this used to do `sys.stdout = log_file` / `sys.stderr = log_file`
+    — but those are process-wide module attributes, not thread-local. Once
+    reassigned here, EVERY print() from every other thread in the process —
+    including the Tkinter main thread and any frontend debugging output —
+    silently redirects into server.log too, which is confusing when trying
+    to debug frontend-side issues (e.g. icon/background loading) with
+    console=True, since those prints never reach the console at all.
+
+    Instead, write directly to the log file object without touching the
+    global stdout/stderr, and point uvicorn's own logging at the same file
+    via a dedicated logging config rather than relying on print()'s default
+    destination.
+    """
     log_file = None
 
     try:
@@ -64,19 +80,44 @@ def _run_server():
             errors="replace",
         )
 
-        sys.stdout = log_file
-        sys.stderr = log_file
+        def _log(msg: str):
+            log_file.write(msg + "\n")
+            log_file.flush()
 
-        print("=== Backend starting ===")
-        print(f"BASE_DIR={BASE_DIR}")
-        print(f"EXE_DIR={EXE_DIR}")
-        print(f"BACKEND_DIR={BACKEND_DIR}")
-        print(f"FRONTEND_DIR={FRONTEND_DIR}")
-        print(f"FIREBASE_CREDENTIALS_PATH={os.environ.get('FIREBASE_CREDENTIALS_PATH')}")
-        print(f"sys.path={sys.path}")
+        _log("=== Backend starting ===")
+        _log(f"BASE_DIR={BASE_DIR}")
+        _log(f"EXE_DIR={EXE_DIR}")
+        _log(f"BACKEND_DIR={BACKEND_DIR}")
+        _log(f"FRONTEND_DIR={FRONTEND_DIR}")
+        _log(f"FIREBASE_CREDENTIALS_PATH={os.environ.get('FIREBASE_CREDENTIALS_PATH')}")
+        _log(f"sys.path={sys.path}")
 
         import uvicorn
         from main import app as fastapi_app
+
+        # Route uvicorn's own loggers to the same file explicitly, instead
+        # of relying on a global stdout/stderr swap that leaks into every
+        # other thread in the process.
+        uvicorn_log_config = {
+            "version": 1,
+            "disable_existing_loggers": False,
+            "formatters": {
+                "default": {
+                    "format": "%(asctime)s %(levelname)s %(name)s: %(message)s",
+                },
+            },
+            "handlers": {
+                "server_log_file": {
+                    "class": "logging.StreamHandler",
+                    "formatter": "default",
+                    "stream": log_file,
+                },
+            },
+            "root": {
+                "handlers": ["server_log_file"],
+                "level": "WARNING",
+            },
+        }
 
         uvicorn.run(
             fastapi_app,
@@ -84,7 +125,7 @@ def _run_server():
             port=8000,
             reload=False,
             workers=1,
-            log_config=None,
+            log_config=uvicorn_log_config,
             log_level="warning",
         )
 

@@ -48,7 +48,7 @@ DP_SDK_BIN_CANDIDATES = [
     r"C:\Program Files\Crossmatch\U.are.U SDK\Windows\Bin",
     r"C:\Program Files (x86)\DigitalPersona\U.are.U SDK\Windows\Bin",
     r"C:\Program Files (x86)\Crossmatch\U.are.U SDK\Windows\Bin",
-    r"C:\Program Files\DigitalPersona\U.are.U RTE\Windows\Lib\DotNET"
+    r"C:\Program Files\DigitalPersona\U.are.U RTE\Windows\Lib\DotNET",
     r"C:\Program Files\DigitalPersona\U.are.U SDK\Windows\Lib\x64",
     r"C:\Program Files\DigitalPersona\Bin"
 ]
