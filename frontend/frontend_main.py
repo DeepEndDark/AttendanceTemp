@@ -20,7 +20,7 @@ def resource_path(relative_path: str) -> str:
     base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, relative_path)
 
-from fapp.api_client import api, APIClient, NetworkError
+from fapp.api_client import api, APIClient, APIError, NetworkError
 from fapp.views.client_display import ClientDisplayWindow
 
 
@@ -271,6 +271,19 @@ class App(tk.Tk):
                 self._display_queue.put({"type": "clear"})
                 net_backoff = 10
                 continue
+            except APIError as e:
+                # Non-2xx HTTP response (401 already triggers the
+                # session-expired redirect via _raise() -> _on_unauthorized;
+                # anything else — e.g. a transient 500/503 — back off
+                # briefly and retry rather than silently killing this
+                # thread, which would stop the scanner forever with no
+                # indication anything went wrong.
+                if e.status_code != 401:
+                    self.after(0, lambda msg=str(e): self._show_network_banner(
+                        f"Scanner error: {msg}"))
+                self._display_queue.put({"type": "clear"})
+                net_backoff = 5
+                continue
 
             if self._scanner_stop.is_set():
                 break
@@ -299,6 +312,13 @@ class App(tk.Tk):
                 self._display_queue.put({"type": "clear"})
                 net_backoff = 10
                 continue
+            except APIError as e:
+                if e.status_code != 401:
+                    self.after(0, lambda msg=str(e): self._show_network_banner(
+                        f"Scanner error: {msg}"))
+                self._display_queue.put({"type": "clear"})
+                net_backoff = 5
+                continue
 
             if self._scanner_stop.is_set():
                 break
@@ -311,7 +331,12 @@ class App(tk.Tk):
                                          "expiry_warn", "expired"):
                     self._att_queue.put(True)
             else:
-                # Auth error (401 already handled via the unauthorized hook)
+                # Defensive fallback only — /attendance/scan always returns
+                # a non-empty dict on a 200 response (even "no match" is a
+                # dict with type: "no_match"), and HTTP/auth errors are now
+                # caught above via except APIError. This branch shouldn't
+                # be reachable in practice; kept in case r.json() ever
+                # returns something unexpectedly falsy.
                 self._display_queue.put({"type": "clear"})
                 _time.sleep(1)
 
@@ -329,9 +354,12 @@ class App(tk.Tk):
         if not self._net_banner_visible:
             self._net_banner.pack(fill="x", side="top", before=self._header_widget)
             self._net_banner_visible = True
-        # Auto-dismiss after 8 s — it reappears immediately if the next
-        # request also fails, so this just clears stale messages.
-        self._net_banner_hide_id = self.after(8000, self._hide_network_banner)
+        # Auto-dismiss after 15 s — it reappears immediately if the next
+        # request also fails, so this just clears stale messages. Must
+        # exceed the scanner loop's longest backoff (10 s for NetworkError)
+        # with margin, or the banner flickers off and back on every retry
+        # cycle during a sustained outage instead of staying visible.
+        self._net_banner_hide_id = self.after(15000, self._hide_network_banner)
 
     def _hide_network_banner(self):
         if not hasattr(self, "_net_banner") or not self._net_banner.winfo_exists():

@@ -417,6 +417,55 @@ class APIClient:
         c = self.cache.get("subscriptions", timeout=3)
         return c if c is not None else self._get("/subscriptions")
 
+    def get_active_subscriptions_by_client(self) -> dict[str, list[str]]:
+        """
+        Live cross-check: returns {plan_name: [client_name, ...]} computed
+        directly from each client's subscriptions subcollection, not from
+        the cached active_subscription_names field. Used as a secondary
+        verification for the plan filter, not the primary path — callers
+        should fall back to the cached field if this call fails.
+        """
+        return self._get("/subscriptions/active-by-client")
+
+    def get_reconciled_client_plans(self, clients_list: list[dict] | None = None
+                                    ) -> dict[str, list[str]]:
+        """
+        Returns {client_name: [plan_name, ...]} using the SAME cached-vs-live
+        reconciliation logic used by the Reports plan filter, so every view
+        that filters by subscription plan (Client List, Attendance, Sales,
+        Reports) is protected by the same secondary check rather than each
+        independently trusting the raw active_subscription_names field.
+
+        clients_list can be passed in if already loaded (avoids a second
+        list_clients() call); otherwise it's fetched here.
+        """
+        if clients_list is None:
+            clients_list = self.list_clients()
+
+        client_plan_map = {
+            c["client_name"]: list(c.get("active_subscription_names", []))
+            for c in clients_list
+        }
+
+        try:
+            live_by_plan = self.get_active_subscriptions_by_client()
+            live_plan_map: dict[str, list[str]] = {}
+            for plan_name, client_names in live_by_plan.items():
+                for cname in client_names:
+                    live_plan_map.setdefault(cname, []).append(plan_name)
+
+            for cname in client_plan_map:
+                # Live data wins — it's recomputed directly from the
+                # subscriptions subcollection rather than a cached field.
+                client_plan_map[cname] = live_plan_map.get(cname, [])
+        except Exception:
+            # Live cross-check unavailable (index still building, network
+            # blip) — fall back to the cached field rather than blocking
+            # the filter entirely. Not fatal.
+            pass
+
+        return client_plan_map
+
     def create_subscription(self, data):
         r = self._post("/subscriptions", data)
         self._refresh_bg("subscriptions")
@@ -543,6 +592,14 @@ class APIClient:
         Blocks up to ~32 s waiting for a finger to be physically placed.
         Returns (touched: bool, scanner_available: bool).
         Raises NetworkError if the backend is unreachable.
+
+        IMPORTANT: a non-2xx HTTP response (401 session expired, 500/503
+        backend error) must go through _raise() — not be silently treated
+        as "no touch yet". The scanner loop runs continuously all day, far
+        more often than any other call in the app; if it swallows HTTP
+        errors the same way as an idle sensor, staff get zero indication
+        anything is wrong (no banner, no session-expired redirect) — the
+        kiosk just looks idle while actually being broken.
         """
         try:
             r = self._session.post(
@@ -551,10 +608,9 @@ class APIClient:
                 headers=self._headers(),
                 timeout=(5, 35),  # read timeout > server-side 30 s
             )
-            if r.status_code == 200:
-                data = r.json()
-                return data.get("touched", False), data.get("scanner_available", True)
-            return False, False
+            self._raise(r)
+            data = r.json()
+            return data.get("touched", False), data.get("scanner_available", True)
         except (
             requests.exceptions.ConnectionError,
             requests.exceptions.Timeout,
@@ -563,8 +619,6 @@ class APIClient:
             err = NetworkError("Cannot reach server. Scanner connection lost.")
             self._fire_network_error(str(err))
             raise err from exc
-        except Exception:
-            return False, False
 
     def fingerprint_scan(self):
         """
@@ -572,6 +626,9 @@ class APIClient:
         Returns display event dict or None on error.
         Read timeout must exceed scanner's 7 s capture window.
         Raises NetworkError if the backend is unreachable.
+        Raises APIError on a non-2xx response (see finger_touch for why
+        this matters — silently swallowing HTTP errors here means staff
+        get zero indication anything is wrong).
         """
         try:
             r = self._session.post(
@@ -580,9 +637,8 @@ class APIClient:
                 headers=self._headers(),
                 timeout=(5, 12),
             )
-            if r.status_code == 200:
-                return r.json()
-            return None
+            self._raise(r)
+            return r.json()
         except (
             requests.exceptions.ConnectionError,
             requests.exceptions.Timeout,
@@ -591,8 +647,6 @@ class APIClient:
             err = NetworkError("Cannot reach server. Scanner connection lost.")
             self._fire_network_error(str(err))
             raise err from exc
-        except Exception:
-            return None
 
     # ── Items ─────────────────────────────────────────────────
 

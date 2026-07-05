@@ -66,15 +66,14 @@ def _pick_month_year(parent, year_var: tk.StringVar,
 def _load_client_plan_map() -> tuple[dict[str, list[str]], list[str]]:
     """
     Returns (client_plan_map, sorted_plan_names).
-    client_plan_map maps client_name -> list of currently active plan names.
+    client_plan_map maps client_name -> list of currently active plan names,
+    reconciled against a live collection_group check (see
+    api.get_reconciled_client_plans) rather than trusting the cached
+    active_subscription_names field on its own.
     Used by all three report tabs to filter "who" the report covers,
     independent of the date range each tab already applies.
     """
-    clients_list = api.list_clients()
-    client_plan_map = {
-        c["client_name"]: c.get("active_subscription_names", [])
-        for c in clients_list
-    }
+    client_plan_map = api.get_reconciled_client_plans()
     all_plan_names = sorted({
         name
         for plans in client_plan_map.values()

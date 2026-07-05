@@ -113,3 +113,47 @@ def rename_subscription(name: str,
         batch.commit()
 
     return _to_read(data)
+
+
+@router.get("/active-by-client")
+def get_active_subscriptions_by_client(_: TokenData = Depends(require_any)):
+    """
+    Secondary/authoritative check for plan filtering across the app.
+
+    The plan filter (Reports, Client List, Attendance, Sales) primarily
+    reads each client's cached `active_subscription_names` field for
+    speed — but that field is denormalized and only updated at specific
+    moments (enroll, re-enroll, the nightly tick). If any of those update
+    paths is ever missed, or a doc is edited directly, the cached field
+    can drift from what the subscriptions subcollection actually says.
+
+    This endpoint recomputes the truth directly: a collection_group query
+    across every client's `subscriptions` subcollection, filtered to
+    `is_active == True`, returning the live client list per plan name.
+    Requires a Firestore collection-group index on `subscriptions` for the
+    `is_active` field (see firestore.indexes.json) — collection_group
+    queries don't get Firestore's automatic single-field indexing the way
+    plain collection queries do.
+
+    Returns: { "PlanName": ["client1", "client2", ...], ... }
+    The frontend can use this to validate the cached field, or as a
+    fallback if a discrepancy is suspected.
+    """
+    from app.core.firestore_client import db
+
+    by_plan: dict[str, list[str]] = {}
+
+    for sub_doc in db.collection_group("subscriptions") \
+                     .where("is_active", "==", True).stream():
+        data = sub_doc.to_dict()
+        plan_name = data.get("subscription_name")
+        if not plan_name:
+            continue
+        # Parent of a subscription doc is the client's subcollection;
+        # its parent is the client document itself.
+        client_name = sub_doc.reference.parent.parent.id
+        by_plan.setdefault(plan_name, [])
+        if client_name not in by_plan[plan_name]:
+            by_plan[plan_name].append(client_name)
+
+    return by_plan

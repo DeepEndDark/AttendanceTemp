@@ -27,6 +27,17 @@ class LoginView(tk.Frame):
         self._firebase_status = "unknown"
         self._poll_job_id     = None
         self._setup_visible   = False
+        self._login_in_flight = False    # True from click until the login
+                                          # request resolves — see
+                                          # _on_ping_result for why this
+                                          # matters: the poller runs on its
+                                          # own independent 5s timer and
+                                          # must not touch the button while
+                                          # an attempt is already running,
+                                          # or a poll tick landing mid-
+                                          # attempt can silently re-enable
+                                          # (or re-disable) the button out
+                                          # from under it.
         self._build()
         self._start_network_poller()
 
@@ -149,7 +160,15 @@ class LoginView(tk.Frame):
         # forward when credentials are missing/erroring.
         can_login = reachable and firebase_status == "ok"
         self._network_ok = can_login
-        self._sign_in_btn.config(state="normal" if can_login else "disabled")
+        # Do NOT touch the button while a login attempt is actively in
+        # flight — this poller runs on its own independent timer and a
+        # tick landing mid-attempt would otherwise silently overwrite the
+        # "Signing in…" disabled state set by _login(), leaving the
+        # button re-enabled (or re-disabled) underneath a request that
+        # hasn't resolved yet. _login_worker's own completion handlers
+        # are responsible for the button once an attempt has started.
+        if not self._login_in_flight:
+            self._sign_in_btn.config(state="normal" if can_login else "disabled")
 
         self._poll_job_id = self.after(POLL_INTERVAL_MS, self._start_network_poller)
 
@@ -181,6 +200,7 @@ class LoginView(tk.Frame):
             self._status.config(text="Username and password required.")
             return
 
+        self._login_in_flight = True
         self._sign_in_btn.config(state="disabled", text="Signing in…")
         self._status.config(text="")
 
@@ -211,11 +231,13 @@ class LoginView(tk.Frame):
         self.after(0, self._login_success)
 
     def _login_success(self):
+        self._login_in_flight = False
         if self._destroyed:
             return
         self.on_success()
 
     def _login_network_error(self):
+        self._login_in_flight = False
         if self._destroyed:
             return
         self._backend_reachable = False
@@ -226,6 +248,7 @@ class LoginView(tk.Frame):
         self._sign_in_btn.config(state="disabled", text="Sign In")
 
     def _login_error(self, msg: str):
+        self._login_in_flight = False
         if self._destroyed:
             return
         self._status.config(text=msg, fg="red")

@@ -13,6 +13,7 @@ class ClientsView(tk.Frame):
         self._queue   = display_queue
         self._loading = False
         self._all_clients: list[dict] = []
+        self._client_plan_map: dict[str, list[str]] = {}
         self._build()
 
     def _build(self):
@@ -134,6 +135,10 @@ class ClientsView(tk.Frame):
             if current not in (["All Plans"] + plan_names):
                 self._plan_filter_var.set("All Plans")
 
+        # Reconciled against a live collection_group check rather than
+        # trusting active_subscription_names on its own — see
+        # api.get_reconciled_client_plans for why this matters.
+        self._client_plan_map = api.get_reconciled_client_plans(clients)
         self._apply_plan_filter()
 
     def _apply_plan_filter(self):
@@ -142,7 +147,7 @@ class ClientsView(tk.Frame):
         if plan and plan != "All Plans":
             visible = [
                 c for c in self._all_clients
-                if plan in (c.get("active_subscription_names") or [])
+                if plan in self._client_plan_map.get(c["client_name"], [])
             ]
         else:
             visible = self._all_clients

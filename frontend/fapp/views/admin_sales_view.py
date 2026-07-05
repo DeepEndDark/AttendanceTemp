@@ -14,6 +14,7 @@ class AdminSalesView(tk.Frame):
         self._selected_uid: int | None = None
         self._all_sales: list[dict] = []
         self._all_clients: list[dict] = []
+        self._client_plan_map: dict[str, list[str]] = {}
         self._sale_map: dict[int, dict] = {}
         self._loading = False
         self._detail_loading_uid: int | None = None
@@ -433,6 +434,10 @@ class AdminSalesView(tk.Frame):
 
         if clients_list is not None:
             self._all_clients = clients_list
+            # Reconciled against a live collection_group check rather than
+            # trusting active_subscription_names on its own — see
+            # api.get_reconciled_client_plans for why this matters.
+            self._client_plan_map = api.get_reconciled_client_plans(clients_list)
         if subs is not None:
             plan_names = sorted({s["subscription_name"] for s in subs})
             self._plan_filter_cb["values"] = ["All Plans"] + plan_names
@@ -562,7 +567,7 @@ class AdminSalesView(tk.Frame):
         if plan_filter and plan_filter != "All Plans":
             matching_names = {
                 c["client_name"] for c in self._all_clients
-                if plan_filter in (c.get("active_subscription_names") or [])
+                if plan_filter in self._client_plan_map.get(c["client_name"], [])
             }
             visible_sales = [
                 s for s in visible_sales
@@ -1123,12 +1128,45 @@ class AdminSalesView(tk.Frame):
             messagebox.showwarning("Select", "Select one or more sales to delete.")
             return
 
+        # Closed sales already had their stock deducted permanently — the
+        # backend does NOT restore it on deletion (see _delete_sale_doc).
+        # Open sales still have reserved (not yet deducted) stock, which
+        # IS correctly released on deletion. The warning needs to say the
+        # right thing for whichever case applies, since a single generic
+        # message would be misleading for closed sales.
+        closed_count = sum(
+            1 for uid in uids
+            if (self._sale_map.get(uid) or {}).get("sale_status") == "closed"
+        )
+        open_count = len(uids) - closed_count
+
         noun = f"{len(uids)} sale(s)" if len(uids) > 1 else f"sale #{uids[0]}"
+
+        if closed_count and open_count:
+            stock_note = (
+                f"⚠ {closed_count} of these {len(uids)} sale(s) are CLOSED — "
+                "their stock was already deducted and will NOT be restored.\n"
+                f"The remaining {open_count} open sale(s) will have reserved "
+                "stock released normally."
+            )
+        elif closed_count:
+            stock_note = (
+                "⚠ This sale is CLOSED — its stock was already deducted "
+                "and will NOT be restored. Inventory counts will not "
+                "reflect the deleted items unless adjusted manually."
+                if len(uids) == 1 else
+                "⚠ All selected sales are CLOSED — their stock was already "
+                "deducted and will NOT be restored. Inventory counts will "
+                "not reflect the deleted items unless adjusted manually."
+            )
+        else:
+            stock_note = "Reserved stock for these open sale(s) will be released."
+
         if not messagebox.askyesno(
             "Confirm Delete",
             f"Delete {noun}?\n\n"
             "This permanently removes the sale log(s).\n"
-            "Reserved stock for open sales will be released.",
+            f"{stock_note}",
         ):
             return
 

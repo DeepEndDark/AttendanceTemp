@@ -248,6 +248,7 @@ class AdminAttendanceView(tk.Frame):
         self._loading   = False
         self._all_logs: list[dict] = []
         self._all_clients: list[dict] = []
+        self._client_plan_map: dict[str, list[str]] = {}
         self._build()
         self._poll_att_queue()
 
@@ -427,6 +428,10 @@ class AdminAttendanceView(tk.Frame):
         update_searchable_combobox_values(self._client_cb, [""] + names)
         self._client_cb.set("")
         self._all_clients = clients_list
+        # Reconciled against a live collection_group check rather than
+        # trusting active_subscription_names on its own — see
+        # api.get_reconciled_client_plans for why this matters.
+        self._client_plan_map = api.get_reconciled_client_plans(clients_list)
 
         if subs is not None:
             plan_names = sorted({s["subscription_name"] for s in subs})
@@ -448,7 +453,7 @@ class AdminAttendanceView(tk.Frame):
         if plan and plan != "All Plans":
             matching_names = {
                 c["client_name"] for c in self._all_clients
-                if plan in (c.get("active_subscription_names") or [])
+                if plan in self._client_plan_map.get(c["client_name"], [])
             }
             return [l for l in self._all_logs
                    if l["client_name"] in matching_names]
