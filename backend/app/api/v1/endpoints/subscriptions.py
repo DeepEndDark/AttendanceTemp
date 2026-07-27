@@ -79,8 +79,6 @@ def get_active_subscriptions_by_client(_: TokenData = Depends(require_any)):
     """
     return get_live_plan_holders()
 
-    return by_plan
-
 
 @router.get("/", response_model=list[SubscriptionRead])
 def list_subscriptions(_: TokenData = Depends(require_any)):
