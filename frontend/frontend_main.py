@@ -242,6 +242,12 @@ class App(tk.Tk):
         else:
             view = self._view_cache[label]
             view.pack(fill="both", expand=True)
+            # The view was built once and only shown/hidden since — without
+            # this, a cached view's data (e.g. Reports' plan filter, which
+            # otherwise never refreshes after its first load) goes stale
+            # the moment something changes elsewhere in the app.
+            if hasattr(view, "refresh"):
+                view.refresh()
 
         self._current_view = view
 

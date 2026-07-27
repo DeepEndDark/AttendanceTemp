@@ -417,6 +417,21 @@ class APIClient:
         c = self.cache.get("subscriptions", timeout=3)
         return c if c is not None else self._get("/subscriptions")
 
+    def get_all_plan_names(self, subs_list: list[dict] | None = None) -> list[str]:
+        """
+        Sorted list of every plan name in the subscription catalog —
+        the single source of truth for populating plan-filter dropdowns
+        (Client List, Attendance, Sales, Reports). Deliberately NOT
+        derived from which clients currently hold a plan, so a brand-new
+        or currently-unused plan still shows up as a filter option.
+
+        subs_list can be passed in if already loaded (avoids a second
+        list_subscriptions() call); otherwise it's fetched here.
+        """
+        if subs_list is None:
+            subs_list = self.list_subscriptions()
+        return sorted({s["subscription_name"] for s in subs_list})
+
     def get_active_subscriptions_by_client(self) -> dict[str, list[str]]:
         """
         Live cross-check: returns {plan_name: [client_name, ...]} computed
@@ -476,8 +491,9 @@ class APIClient:
         self._refresh_bg("subscriptions")
         return r
 
-    def delete_subscription(self, name):
-        self._delete(f"/subscriptions/{name}")
+    def delete_subscription(self, name: str, force: bool = False):
+        suffix = "?force=true" if force else ""
+        self._delete(f"/subscriptions/{name}{suffix}")
         self._refresh_bg("subscriptions")
 
     def rename_subscription(self, name: str, new_name: str):

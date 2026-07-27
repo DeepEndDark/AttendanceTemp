@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.api.dependencies import require_admin, require_any
 from app.core.firestore_client import subscriptions
@@ -22,29 +22,25 @@ def _to_read(d: dict) -> SubscriptionRead:
         trainer_hardcap_days=d.get("trainer_hardcap_days", 0),
     )
 
-@router.get("/active-by-client")
-def get_active_subscriptions_by_client(_: TokenData = Depends(require_any)):
+def get_live_plan_holders() -> dict[str, list[str]]:
     """
-    Secondary/authoritative check for plan filtering across the app.
+    Recomputes plan membership directly from Firestore rather than the
+    denormalized `active_subscription_names` field on client docs: a
+    collection_group query across every client's `subscriptions`
+    subcollection, filtered to `is_active == True`.
 
-    The plan filter (Reports, Client List, Attendance, Sales) primarily
-    reads each client's cached `active_subscription_names` field for
-    speed — but that field is denormalized and only updated at specific
-    moments (enroll, re-enroll, the nightly tick). If any of those update
-    paths is ever missed, or a doc is edited directly, the cached field
-    can drift from what the subscriptions subcollection actually says.
+    Shared by the `/active-by-client` endpoint below (for the frontend's
+    live cross-check) and by the PDF report export in reports.py, so both
+    the on-screen plan filter and the exported report are checked against
+    the same live truth rather than the export trusting a field that
+    could have drifted.
 
-    This endpoint recomputes the truth directly: a collection_group query
-    across every client's `subscriptions` subcollection, filtered to
-    `is_active == True`, returning the live client list per plan name.
     Requires a Firestore collection-group index on `subscriptions` for the
     `is_active` field (see firestore.indexes.json) — collection_group
     queries don't get Firestore's automatic single-field indexing the way
     plain collection queries do.
 
     Returns: { "PlanName": ["client1", "client2", ...], ... }
-    The frontend can use this to validate the cached field, or as a
-    fallback if a discrepancy is suspected.
     """
     from app.core.firestore_client import db
 
@@ -62,6 +58,28 @@ def get_active_subscriptions_by_client(_: TokenData = Depends(require_any)):
         by_plan.setdefault(plan_name, [])
         if client_name not in by_plan[plan_name]:
             by_plan[plan_name].append(client_name)
+
+    return by_plan
+
+
+@router.get("/active-by-client")
+def get_active_subscriptions_by_client(_: TokenData = Depends(require_any)):
+    """
+    Secondary/authoritative check for plan filtering across the app.
+
+    The plan filter (Reports, Client List, Attendance, Sales) primarily
+    reads each client's cached `active_subscription_names` field for
+    speed — but that field is denormalized and only updated at specific
+    moments (enroll, re-enroll, the nightly tick). If any of those update
+    paths is ever missed, or a doc is edited directly, the cached field
+    can drift from what the subscriptions subcollection actually says.
+
+    The frontend can use this to validate the cached field, or as a
+    fallback if a discrepancy is suspected.
+    """
+    return get_live_plan_holders()
+
+    return by_plan
 
 
 @router.get("/", response_model=list[SubscriptionRead])
@@ -99,10 +117,44 @@ def update_subscription(name: str, payload: SubscriptionUpdate,
 
 
 @router.delete("/{name}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_subscription(name: str, _: TokenData = Depends(require_admin)):
+def delete_subscription(name: str, force: bool = Query(False),
+                        _: TokenData = Depends(require_admin)):
+    """
+    Deletes a plan from the catalog only. Existing holders are unaffected —
+    each client's subscription record is a denormalized copy made at
+    enroll time, so it keeps ticking down and expiring normally even
+    after the catalog entry is gone.
+
+    By default this refuses to delete a plan that still has active
+    holders, so an admin doesn't do this silently. Pass ?force=true to
+    delete anyway (e.g. plan was created by mistake, or holders are
+    being migrated off it deliberately).
+    """
     ref = subscriptions().document(name)
     if not ref.get().exists:
         raise HTTPException(status_code=404, detail="Subscription not found")
+
+    if not force:
+        from app.core.firestore_client import db
+        # Reuses the existing is_active collection_group index and filters
+        # by plan name in Python, rather than adding a second composite
+        # index just for this check.
+        holder_count = sum(
+            1 for doc in db.collection_group("subscriptions")
+                .where("is_active", "==", True).stream()
+            if doc.to_dict().get("subscription_name") == name
+        )
+        if holder_count:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{holder_count} client(s) currently hold this plan. "
+                    "Deleting it only removes it from the catalog — "
+                    "existing holders keep their subscription until it "
+                    "expires normally. Pass force=true to delete anyway."
+                ),
+            )
+
     ref.delete()
 
 
@@ -154,5 +206,3 @@ def rename_subscription(name: str,
         batch.commit()
 
     return _to_read(data)
-
-    return by_plan

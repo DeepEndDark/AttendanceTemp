@@ -70,15 +70,18 @@ def _load_client_plan_map() -> tuple[dict[str, list[str]], list[str]]:
     reconciled against a live collection_group check (see
     api.get_reconciled_client_plans) rather than trusting the cached
     active_subscription_names field on its own.
+
+    sorted_plan_names comes from the plan catalog (api.get_all_plan_names),
+    NOT derived from client_plan_map — this matches how the plan filter
+    dropdown is populated on Client List, Attendance, and Sales, so a plan
+    with zero active clients still appears as a filter option here too,
+    instead of silently disappearing from Reports only.
+
     Used by all three report tabs to filter "who" the report covers,
     independent of the date range each tab already applies.
     """
     client_plan_map = api.get_reconciled_client_plans()
-    all_plan_names = sorted({
-        name
-        for plans in client_plan_map.values()
-        for name in plans
-    })
+    all_plan_names = api.get_all_plan_names()
     return client_plan_map, all_plan_names
 
 

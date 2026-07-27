@@ -16,14 +16,26 @@ def _filter_purchases_by_plan(purchases: list[dict],
     plans include `plan`. No-op if plan is None/empty.
     Mirrors the same filter the frontend applies to the on-screen report,
     so the exported PDF matches what's shown when a plan filter is active.
+
+    Uses the same live collection_group reconciliation as the on-screen
+    filter (see subscriptions.get_live_plan_holders) rather than trusting
+    the denormalized active_subscription_names field directly — otherwise
+    the export and the on-screen report could disagree if that field has
+    drifted. Falls back to the cached field only if the live check itself
+    fails (e.g. index still building), so an export never hard-fails.
     """
     if not plan:
         return purchases
-    matching_names = {
-        doc.id
-        for doc in clients_col().stream()
-        if plan in (doc.to_dict().get("active_subscription_names") or [])
-    }
+
+    try:
+        from app.api.v1.endpoints.subscriptions import get_live_plan_holders
+        matching_names = set(get_live_plan_holders().get(plan, []))
+    except Exception:
+        matching_names = {
+            doc.id
+            for doc in clients_col().stream()
+            if plan in (doc.to_dict().get("active_subscription_names") or [])
+        }
     return [p for p in purchases if p["client_name"] in matching_names]
 
 

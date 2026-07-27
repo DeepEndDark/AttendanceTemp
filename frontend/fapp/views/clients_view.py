@@ -128,7 +128,7 @@ class ClientsView(tk.Frame):
         self._all_clients = clients
 
         if subs is not None:
-            plan_names = sorted({s["subscription_name"] for s in subs})
+            plan_names = api.get_all_plan_names(subs)
             current = self._plan_filter_var.get()
             self._plan_filter_cb["values"] = ["All Plans"] + plan_names
             # Keep current selection if it's still valid, else reset

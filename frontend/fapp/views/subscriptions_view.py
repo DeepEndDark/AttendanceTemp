@@ -133,11 +133,23 @@ class SubscriptionsView(tk.Frame):
         name = self._selected_name()
         if not name:
             return
-        if messagebox.askyesno("Confirm", f"Delete plan '{name}'?"):
-            try:
-                api.delete_subscription(name)
-                self.refresh()
-            except APIError as e:
+        if not messagebox.askyesno("Confirm", f"Delete plan '{name}'?"):
+            return
+        try:
+            api.delete_subscription(name)
+            self.refresh()
+        except APIError as e:
+            if e.status_code == 409:
+                # Backend refused because clients still hold this plan —
+                # surface its exact count and let the admin force it.
+                if messagebox.askyesno("Plan in use",
+                                       f"{e}\n\nDelete anyway?"):
+                    try:
+                        api.delete_subscription(name, force=True)
+                        self.refresh()
+                    except APIError as e2:
+                        messagebox.showerror("Error", str(e2))
+            else:
                 messagebox.showerror("Error", str(e))
 
 

@@ -1,0 +1,326 @@
+diff --git a/backend/app/api/v1/endpoints/reports.py b/backend/app/api/v1/endpoints/reports.py
+index b10fb9e..da725c6 100644
+--- a/backend/app/api/v1/endpoints/reports.py
++++ b/backend/app/api/v1/endpoints/reports.py
+@@ -16,14 +16,26 @@ def _filter_purchases_by_plan(purchases: list[dict],
+     plans include `plan`. No-op if plan is None/empty.
+     Mirrors the same filter the frontend applies to the on-screen report,
+     so the exported PDF matches what's shown when a plan filter is active.
++
++    Uses the same live collection_group reconciliation as the on-screen
++    filter (see subscriptions.get_live_plan_holders) rather than trusting
++    the denormalized active_subscription_names field directly — otherwise
++    the export and the on-screen report could disagree if that field has
++    drifted. Falls back to the cached field only if the live check itself
++    fails (e.g. index still building), so an export never hard-fails.
+     """
+     if not plan:
+         return purchases
+-    matching_names = {
+-        doc.id
+-        for doc in clients_col().stream()
+-        if plan in (doc.to_dict().get("active_subscription_names") or [])
+-    }
++
++    try:
++        from app.api.v1.endpoints.subscriptions import get_live_plan_holders
++        matching_names = set(get_live_plan_holders().get(plan, []))
++    except Exception:
++        matching_names = {
++            doc.id
++            for doc in clients_col().stream()
++            if plan in (doc.to_dict().get("active_subscription_names") or [])
++        }
+     return [p for p in purchases if p["client_name"] in matching_names]
+ 
+ 
+diff --git a/backend/app/api/v1/endpoints/subscriptions.py b/backend/app/api/v1/endpoints/subscriptions.py
+index e25d09b..c20e444 100644
+--- a/backend/app/api/v1/endpoints/subscriptions.py
++++ b/backend/app/api/v1/endpoints/subscriptions.py
+@@ -1,4 +1,4 @@
+-from fastapi import APIRouter, Depends, HTTPException, status
++from fastapi import APIRouter, Depends, HTTPException, Query, status
+ 
+ from app.api.dependencies import require_admin, require_any
+ from app.core.firestore_client import subscriptions
+@@ -22,29 +22,25 @@ def _to_read(d: dict) -> SubscriptionRead:
+         trainer_hardcap_days=d.get("trainer_hardcap_days", 0),
+     )
+ 
+-@router.get("/active-by-client")
+-def get_active_subscriptions_by_client(_: TokenData = Depends(require_any)):
++def get_live_plan_holders() -> dict[str, list[str]]:
+     """
+-    Secondary/authoritative check for plan filtering across the app.
++    Recomputes plan membership directly from Firestore rather than the
++    denormalized `active_subscription_names` field on client docs: a
++    collection_group query across every client's `subscriptions`
++    subcollection, filtered to `is_active == True`.
+ 
+-    The plan filter (Reports, Client List, Attendance, Sales) primarily
+-    reads each client's cached `active_subscription_names` field for
+-    speed — but that field is denormalized and only updated at specific
+-    moments (enroll, re-enroll, the nightly tick). If any of those update
+-    paths is ever missed, or a doc is edited directly, the cached field
+-    can drift from what the subscriptions subcollection actually says.
++    Shared by the `/active-by-client` endpoint below (for the frontend's
++    live cross-check) and by the PDF report export in reports.py, so both
++    the on-screen plan filter and the exported report are checked against
++    the same live truth rather than the export trusting a field that
++    could have drifted.
+ 
+-    This endpoint recomputes the truth directly: a collection_group query
+-    across every client's `subscriptions` subcollection, filtered to
+-    `is_active == True`, returning the live client list per plan name.
+     Requires a Firestore collection-group index on `subscriptions` for the
+     `is_active` field (see firestore.indexes.json) — collection_group
+     queries don't get Firestore's automatic single-field indexing the way
+     plain collection queries do.
+ 
+     Returns: { "PlanName": ["client1", "client2", ...], ... }
+-    The frontend can use this to validate the cached field, or as a
+-    fallback if a discrepancy is suspected.
+     """
+     from app.core.firestore_client import db
+ 
+@@ -63,6 +59,28 @@ def get_active_subscriptions_by_client(_: TokenData = Depends(require_any)):
+         if client_name not in by_plan[plan_name]:
+             by_plan[plan_name].append(client_name)
+ 
++    return by_plan
++
++
++@router.get("/active-by-client")
++def get_active_subscriptions_by_client(_: TokenData = Depends(require_any)):
++    """
++    Secondary/authoritative check for plan filtering across the app.
++
++    The plan filter (Reports, Client List, Attendance, Sales) primarily
++    reads each client's cached `active_subscription_names` field for
++    speed — but that field is denormalized and only updated at specific
++    moments (enroll, re-enroll, the nightly tick). If any of those update
++    paths is ever missed, or a doc is edited directly, the cached field
++    can drift from what the subscriptions subcollection actually says.
++
++    The frontend can use this to validate the cached field, or as a
++    fallback if a discrepancy is suspected.
++    """
++    return get_live_plan_holders()
++
++    return by_plan
++
+ 
+ @router.get("/", response_model=list[SubscriptionRead])
+ def list_subscriptions(_: TokenData = Depends(require_any)):
+@@ -99,10 +117,44 @@ def update_subscription(name: str, payload: SubscriptionUpdate,
+ 
+ 
+ @router.delete("/{name}", status_code=status.HTTP_204_NO_CONTENT)
+-def delete_subscription(name: str, _: TokenData = Depends(require_admin)):
++def delete_subscription(name: str, force: bool = Query(False),
++                        _: TokenData = Depends(require_admin)):
++    """
++    Deletes a plan from the catalog only. Existing holders are unaffected —
++    each client's subscription record is a denormalized copy made at
++    enroll time, so it keeps ticking down and expiring normally even
++    after the catalog entry is gone.
++
++    By default this refuses to delete a plan that still has active
++    holders, so an admin doesn't do this silently. Pass ?force=true to
++    delete anyway (e.g. plan was created by mistake, or holders are
++    being migrated off it deliberately).
++    """
+     ref = subscriptions().document(name)
+     if not ref.get().exists:
+         raise HTTPException(status_code=404, detail="Subscription not found")
++
++    if not force:
++        from app.core.firestore_client import db
++        # Reuses the existing is_active collection_group index and filters
++        # by plan name in Python, rather than adding a second composite
++        # index just for this check.
++        holder_count = sum(
++            1 for doc in db.collection_group("subscriptions")
++                .where("is_active", "==", True).stream()
++            if doc.to_dict().get("subscription_name") == name
++        )
++        if holder_count:
++            raise HTTPException(
++                status_code=409,
++                detail=(
++                    f"{holder_count} client(s) currently hold this plan. "
++                    "Deleting it only removes it from the catalog — "
++                    "existing holders keep their subscription until it "
++                    "expires normally. Pass force=true to delete anyway."
++                ),
++            )
++
+     ref.delete()
+ 
+ 
+@@ -153,6 +205,4 @@ def rename_subscription(name: str,
+     if batch_count:
+         batch.commit()
+ 
+-    return _to_read(data)
+-
+-    return by_plan
+\ No newline at end of file
++    return _to_read(data)
+\ No newline at end of file
+diff --git a/frontend/fapp/api_client.py b/frontend/fapp/api_client.py
+index f89e48b..d946779 100644
+--- a/frontend/fapp/api_client.py
++++ b/frontend/fapp/api_client.py
+@@ -417,6 +417,21 @@ class APIClient:
+         c = self.cache.get("subscriptions", timeout=3)
+         return c if c is not None else self._get("/subscriptions")
+ 
++    def get_all_plan_names(self, subs_list: list[dict] | None = None) -> list[str]:
++        """
++        Sorted list of every plan name in the subscription catalog —
++        the single source of truth for populating plan-filter dropdowns
++        (Client List, Attendance, Sales, Reports). Deliberately NOT
++        derived from which clients currently hold a plan, so a brand-new
++        or currently-unused plan still shows up as a filter option.
++
++        subs_list can be passed in if already loaded (avoids a second
++        list_subscriptions() call); otherwise it's fetched here.
++        """
++        if subs_list is None:
++            subs_list = self.list_subscriptions()
++        return sorted({s["subscription_name"] for s in subs_list})
++
+     def get_active_subscriptions_by_client(self) -> dict[str, list[str]]:
+         """
+         Live cross-check: returns {plan_name: [client_name, ...]} computed
+@@ -476,8 +491,9 @@ class APIClient:
+         self._refresh_bg("subscriptions")
+         return r
+ 
+-    def delete_subscription(self, name):
+-        self._delete(f"/subscriptions/{name}")
++    def delete_subscription(self, name: str, force: bool = False):
++        suffix = "?force=true" if force else ""
++        self._delete(f"/subscriptions/{name}{suffix}")
+         self._refresh_bg("subscriptions")
+ 
+     def rename_subscription(self, name: str, new_name: str):
+diff --git a/frontend/fapp/views/admin_attendance_view.py b/frontend/fapp/views/admin_attendance_view.py
+index 36378cc..83f1b4a 100644
+--- a/frontend/fapp/views/admin_attendance_view.py
++++ b/frontend/fapp/views/admin_attendance_view.py
+@@ -434,7 +434,7 @@ class AdminAttendanceView(tk.Frame):
+         self._client_plan_map = api.get_reconciled_client_plans(clients_list)
+ 
+         if subs is not None:
+-            plan_names = sorted({s["subscription_name"] for s in subs})
++            plan_names = api.get_all_plan_names(subs)
+             self._plan_filter_cb["values"] = ["All Plans"] + plan_names
+             self._plan_filter_var.set("All Plans")
+ 
+diff --git a/frontend/fapp/views/admin_sales_view.py b/frontend/fapp/views/admin_sales_view.py
+index e986b7c..ff347da 100644
+--- a/frontend/fapp/views/admin_sales_view.py
++++ b/frontend/fapp/views/admin_sales_view.py
+@@ -439,7 +439,7 @@ class AdminSalesView(tk.Frame):
+             # api.get_reconciled_client_plans for why this matters.
+             self._client_plan_map = api.get_reconciled_client_plans(clients_list)
+         if subs is not None:
+-            plan_names = sorted({s["subscription_name"] for s in subs})
++            plan_names = api.get_all_plan_names(subs)
+             self._plan_filter_cb["values"] = ["All Plans"] + plan_names
+             self._plan_filter_var.set("All Plans")
+ 
+diff --git a/frontend/fapp/views/clients_view.py b/frontend/fapp/views/clients_view.py
+index 94c3f52..54a58fb 100644
+--- a/frontend/fapp/views/clients_view.py
++++ b/frontend/fapp/views/clients_view.py
+@@ -128,7 +128,7 @@ class ClientsView(tk.Frame):
+         self._all_clients = clients
+ 
+         if subs is not None:
+-            plan_names = sorted({s["subscription_name"] for s in subs})
++            plan_names = api.get_all_plan_names(subs)
+             current = self._plan_filter_var.get()
+             self._plan_filter_cb["values"] = ["All Plans"] + plan_names
+             # Keep current selection if it's still valid, else reset
+diff --git a/frontend/fapp/views/reports_view.py b/frontend/fapp/views/reports_view.py
+index de78cef..f511db2 100644
+--- a/frontend/fapp/views/reports_view.py
++++ b/frontend/fapp/views/reports_view.py
+@@ -70,15 +70,18 @@ def _load_client_plan_map() -> tuple[dict[str, list[str]], list[str]]:
+     reconciled against a live collection_group check (see
+     api.get_reconciled_client_plans) rather than trusting the cached
+     active_subscription_names field on its own.
++
++    sorted_plan_names comes from the plan catalog (api.get_all_plan_names),
++    NOT derived from client_plan_map — this matches how the plan filter
++    dropdown is populated on Client List, Attendance, and Sales, so a plan
++    with zero active clients still appears as a filter option here too,
++    instead of silently disappearing from Reports only.
++
+     Used by all three report tabs to filter "who" the report covers,
+     independent of the date range each tab already applies.
+     """
+     client_plan_map = api.get_reconciled_client_plans()
+-    all_plan_names = sorted({
+-        name
+-        for plans in client_plan_map.values()
+-        for name in plans
+-    })
++    all_plan_names = api.get_all_plan_names()
+     return client_plan_map, all_plan_names
+ 
+ 
+diff --git a/frontend/fapp/views/subscriptions_view.py b/frontend/fapp/views/subscriptions_view.py
+index b7295f4..9a19237 100644
+--- a/frontend/fapp/views/subscriptions_view.py
++++ b/frontend/fapp/views/subscriptions_view.py
+@@ -133,11 +133,23 @@ class SubscriptionsView(tk.Frame):
+         name = self._selected_name()
+         if not name:
+             return
+-        if messagebox.askyesno("Confirm", f"Delete plan '{name}'?"):
+-            try:
+-                api.delete_subscription(name)
+-                self.refresh()
+-            except APIError as e:
++        if not messagebox.askyesno("Confirm", f"Delete plan '{name}'?"):
++            return
++        try:
++            api.delete_subscription(name)
++            self.refresh()
++        except APIError as e:
++            if e.status_code == 409:
++                # Backend refused because clients still hold this plan —
++                # surface its exact count and let the admin force it.
++                if messagebox.askyesno("Plan in use",
++                                       f"{e}\n\nDelete anyway?"):
++                    try:
++                        api.delete_subscription(name, force=True)
++                        self.refresh()
++                    except APIError as e2:
++                        messagebox.showerror("Error", str(e2))
++            else:
+                 messagebox.showerror("Error", str(e))
+ 
+ 
+diff --git a/frontend/frontend_main.py b/frontend/frontend_main.py
+index 4aa4016..96bc62a 100644
+--- a/frontend/frontend_main.py
++++ b/frontend/frontend_main.py
+@@ -242,6 +242,12 @@ class App(tk.Tk):
+         else:
+             view = self._view_cache[label]
+             view.pack(fill="both", expand=True)
++            # The view was built once and only shown/hidden since — without
++            # this, a cached view's data (e.g. Reports' plan filter, which
++            # otherwise never refreshes after its first load) goes stale
++            # the moment something changes elsewhere in the app.
++            if hasattr(view, "refresh"):
++                view.refresh()
+ 
+         self._current_view = view
+ 
