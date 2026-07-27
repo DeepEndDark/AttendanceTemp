@@ -1,16 +1,3 @@
-diff --git a/backend/app/api/v1/endpoints/subscriptions.py b/backend/app/api/v1/endpoints/subscriptions.py
-index c20e444..9e74df8 100644
---- a/backend/app/api/v1/endpoints/subscriptions.py
-+++ b/backend/app/api/v1/endpoints/subscriptions.py
-@@ -79,8 +79,6 @@ def get_active_subscriptions_by_client(_: TokenData = Depends(require_any)):
-     """
-     return get_live_plan_holders()
- 
--    return by_plan
--
- 
- @router.get("/", response_model=list[SubscriptionRead])
- def list_subscriptions(_: TokenData = Depends(require_any)):
 diff --git a/frontend/fapp/api_client.py b/frontend/fapp/api_client.py
 index d946779..b270d57 100644
 --- a/frontend/fapp/api_client.py
@@ -172,10 +159,24 @@ index 54a58fb..de71901 100644
          else:
              visible = self._all_clients
 diff --git a/frontend/fapp/views/reports_view.py b/frontend/fapp/views/reports_view.py
-index f511db2..a15a45d 100644
+index f511db2..0b1cf2c 100644
 --- a/frontend/fapp/views/reports_view.py
 +++ b/frontend/fapp/views/reports_view.py
-@@ -81,7 +81,7 @@ def _load_client_plan_map() -> tuple[dict[str, list[str]], list[str]]:
+@@ -72,16 +72,17 @@ def _load_client_plan_map() -> tuple[dict[str, list[str]], list[str]]:
+     active_subscription_names field on its own.
+ 
+     sorted_plan_names comes from the plan catalog (api.get_all_plan_names),
+-    NOT derived from client_plan_map — this matches how the plan filter
+-    dropdown is populated on Client List, Attendance, and Sales, so a plan
+-    with zero active clients still appears as a filter option here too,
+-    instead of silently disappearing from Reports only.
++    unioned with any plan names still held by a client even if the catalog
++    entry was since deleted (marked "(legacy)") — this matches how the
++    plan filter dropdown is populated on Client List, Attendance, and
++    Sales, so a plan with zero active clients still appears as a filter
++    option here too, and a deleted-but-held plan doesn't silently vanish.
+ 
+     Used by all three report tabs to filter "who" the report covers,
      independent of the date range each tab already applies.
      """
      client_plan_map = api.get_reconciled_client_plans()
@@ -184,7 +185,7 @@ index f511db2..a15a45d 100644
      return client_plan_map, all_plan_names
  
  
-@@ -130,9 +130,10 @@ def _filter_report_by_plan(report: dict, plan: str,
+@@ -130,9 +131,10 @@ def _filter_report_by_plan(report: dict, plan: str,
      if not plan or plan == "All Plans":
          return report
  
@@ -196,7 +197,7 @@ index f511db2..a15a45d 100644
      }
      purchases = [
          p for p in report.get("purchases", [])
-@@ -443,7 +444,7 @@ class _DailyReportTab(tk.Frame):
+@@ -443,7 +445,7 @@ class _DailyReportTab(tk.Frame):
          if self._loading:
              return
          plan = self._plan_var.get()
@@ -205,7 +206,7 @@ index f511db2..a15a45d 100644
          d = self._date_var.get().strip()
          suffix = f"_{plan.replace(' ', '_')}" if plan else ""
          path = filedialog.asksaveasfilename(
-@@ -659,7 +660,7 @@ class _MonthlyReportTab(tk.Frame):
+@@ -659,7 +661,7 @@ class _MonthlyReportTab(tk.Frame):
              messagebox.showerror("Invalid", "Select a valid month first.")
              return
          plan = self._plan_var.get()
@@ -214,7 +215,7 @@ index f511db2..a15a45d 100644
          suffix = f"_{plan.replace(' ', '_')}" if plan else ""
          path = filedialog.asksaveasfilename(
              defaultextension=".pdf",
-@@ -880,7 +881,7 @@ class _CustomReportTab(tk.Frame):
+@@ -880,7 +882,7 @@ class _CustomReportTab(tk.Frame):
          if not rng:
              return
          plan = self._plan_var.get()
