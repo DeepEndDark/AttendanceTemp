@@ -439,7 +439,7 @@ class AdminSalesView(tk.Frame):
             # api.get_reconciled_client_plans for why this matters.
             self._client_plan_map = api.get_reconciled_client_plans(clients_list)
         if subs is not None:
-            plan_names = api.get_all_plan_names(subs)
+            plan_names = api.get_all_plan_names(subs, self._client_plan_map)
             self._plan_filter_cb["values"] = ["All Plans"] + plan_names
             self._plan_filter_var.set("All Plans")
 
@@ -565,9 +565,10 @@ class AdminSalesView(tk.Frame):
 
         plan_filter = self._plan_filter_var.get()
         if plan_filter and plan_filter != "All Plans":
+            plan_key = api.plan_filter_key(plan_filter)
             matching_names = {
                 c["client_name"] for c in self._all_clients
-                if plan_filter in self._client_plan_map.get(c["client_name"], [])
+                if plan_key in self._client_plan_map.get(c["client_name"], [])
             }
             visible_sales = [
                 s for s in visible_sales

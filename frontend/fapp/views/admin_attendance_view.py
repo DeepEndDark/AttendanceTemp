@@ -434,7 +434,7 @@ class AdminAttendanceView(tk.Frame):
         self._client_plan_map = api.get_reconciled_client_plans(clients_list)
 
         if subs is not None:
-            plan_names = api.get_all_plan_names(subs)
+            plan_names = api.get_all_plan_names(subs, self._client_plan_map)
             self._plan_filter_cb["values"] = ["All Plans"] + plan_names
             self._plan_filter_var.set("All Plans")
 
@@ -451,9 +451,10 @@ class AdminAttendanceView(tk.Frame):
         """
         plan = self._plan_filter_var.get()
         if plan and plan != "All Plans":
+            key = api.plan_filter_key(plan)
             matching_names = {
                 c["client_name"] for c in self._all_clients
-                if plan in self._client_plan_map.get(c["client_name"], [])
+                if key in self._client_plan_map.get(c["client_name"], [])
             }
             return [l for l in self._all_logs
                    if l["client_name"] in matching_names]

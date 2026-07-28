@@ -417,20 +417,58 @@ class APIClient:
         c = self.cache.get("subscriptions", timeout=3)
         return c if c is not None else self._get("/subscriptions")
 
-    def get_all_plan_names(self, subs_list: list[dict] | None = None) -> list[str]:
+    LEGACY_PLAN_SUFFIX = " (legacy)"
+
+    def get_all_plan_names(self, subs_list: list[dict] | None = None,
+                           client_plan_map: dict[str, list[str]] | None = None
+                           ) -> list[str]:
         """
-        Sorted list of every plan name in the subscription catalog —
-        the single source of truth for populating plan-filter dropdowns
-        (Client List, Attendance, Sales, Reports). Deliberately NOT
-        derived from which clients currently hold a plan, so a brand-new
-        or currently-unused plan still shows up as a filter option.
+        Sorted list of every plan name to offer in a plan-filter dropdown —
+        the single source of truth for Client List, Attendance, Sales, and
+        Reports.
+
+        Two sources are unioned:
+        - The live catalog (list_subscriptions()) — so a brand-new or
+          currently-unused plan still shows up as a filter option.
+        - client_plan_map, if passed — plan names any client currently
+          holds, even if the catalog entry was since deleted. Without
+          this, a deleted-but-still-held ("legacy") plan silently
+          disappears from every filter, with no way to isolate which
+          clients are still on it.
+
+        Catalog plans are listed as-is; legacy-only plans (held by a
+        client but absent from the catalog) get an " (legacy)" suffix so
+        they're visually distinguishable. Use plan_filter_key() to strip
+        that suffix back off before matching against a client's actual
+        held plan names, or before sending the value to the backend.
 
         subs_list can be passed in if already loaded (avoids a second
         list_subscriptions() call); otherwise it's fetched here.
         """
         if subs_list is None:
             subs_list = self.list_subscriptions()
-        return sorted({s["subscription_name"] for s in subs_list})
+        catalog_names = {s["subscription_name"] for s in subs_list}
+
+        held_names = set(catalog_names)
+        if client_plan_map:
+            for plans in client_plan_map.values():
+                held_names.update(plans)
+
+        legacy_names = held_names - catalog_names
+        return sorted(catalog_names) + sorted(
+            f"{n}{self.LEGACY_PLAN_SUFFIX}" for n in legacy_names)
+
+    @classmethod
+    def plan_filter_key(cls, display_name: str) -> str:
+        """
+        Strips the " (legacy)" marker (if present) so a dropdown selection
+        can be matched against a client's actual held plan name, or sent
+        to the backend as a filter value — the backend has no concept of
+        this marker, it's purely a frontend display distinction.
+        """
+        if display_name.endswith(cls.LEGACY_PLAN_SUFFIX):
+            return display_name[:-len(cls.LEGACY_PLAN_SUFFIX)]
+        return display_name
 
     def get_active_subscriptions_by_client(self) -> dict[str, list[str]]:
         """

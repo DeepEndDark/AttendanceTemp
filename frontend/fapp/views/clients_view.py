@@ -127,27 +127,29 @@ class ClientsView(tk.Frame):
         self._loading = False
         self._all_clients = clients
 
+        # Reconciled against a live collection_group check rather than
+        # trusting active_subscription_names on its own — see
+        # api.get_reconciled_client_plans for why this matters.
+        self._client_plan_map = api.get_reconciled_client_plans(clients)
+
         if subs is not None:
-            plan_names = api.get_all_plan_names(subs)
+            plan_names = api.get_all_plan_names(subs, self._client_plan_map)
             current = self._plan_filter_var.get()
             self._plan_filter_cb["values"] = ["All Plans"] + plan_names
             # Keep current selection if it's still valid, else reset
             if current not in (["All Plans"] + plan_names):
                 self._plan_filter_var.set("All Plans")
 
-        # Reconciled against a live collection_group check rather than
-        # trusting active_subscription_names on its own — see
-        # api.get_reconciled_client_plans for why this matters.
-        self._client_plan_map = api.get_reconciled_client_plans(clients)
         self._apply_plan_filter()
 
     def _apply_plan_filter(self):
         """Render the tree from cached clients, filtered by selected plan."""
         plan = self._plan_filter_var.get()
         if plan and plan != "All Plans":
+            key = api.plan_filter_key(plan)
             visible = [
                 c for c in self._all_clients
-                if plan in self._client_plan_map.get(c["client_name"], [])
+                if key in self._client_plan_map.get(c["client_name"], [])
             ]
         else:
             visible = self._all_clients

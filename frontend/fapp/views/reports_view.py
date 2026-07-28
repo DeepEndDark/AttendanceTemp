@@ -72,16 +72,17 @@ def _load_client_plan_map() -> tuple[dict[str, list[str]], list[str]]:
     active_subscription_names field on its own.
 
     sorted_plan_names comes from the plan catalog (api.get_all_plan_names),
-    NOT derived from client_plan_map — this matches how the plan filter
-    dropdown is populated on Client List, Attendance, and Sales, so a plan
-    with zero active clients still appears as a filter option here too,
-    instead of silently disappearing from Reports only.
+    unioned with any plan names still held by a client even if the catalog
+    entry was since deleted (marked "(legacy)") — this matches how the
+    plan filter dropdown is populated on Client List, Attendance, and
+    Sales, so a plan with zero active clients still appears as a filter
+    option here too, and a deleted-but-held plan doesn't silently vanish.
 
     Used by all three report tabs to filter "who" the report covers,
     independent of the date range each tab already applies.
     """
     client_plan_map = api.get_reconciled_client_plans()
-    all_plan_names = api.get_all_plan_names()
+    all_plan_names = api.get_all_plan_names(client_plan_map=client_plan_map)
     return client_plan_map, all_plan_names
 
 
@@ -130,9 +131,10 @@ def _filter_report_by_plan(report: dict, plan: str,
     if not plan or plan == "All Plans":
         return report
 
+    plan_key = api.plan_filter_key(plan)
     matching_names = {
         name for name, plans in client_plan_map.items()
-        if plan in plans
+        if plan_key in plans
     }
     purchases = [
         p for p in report.get("purchases", [])
@@ -443,7 +445,7 @@ class _DailyReportTab(tk.Frame):
         if self._loading:
             return
         plan = self._plan_var.get()
-        plan = plan if plan and plan != "All Plans" else None
+        plan = api.plan_filter_key(plan) if plan and plan != "All Plans" else None
         d = self._date_var.get().strip()
         suffix = f"_{plan.replace(' ', '_')}" if plan else ""
         path = filedialog.asksaveasfilename(
@@ -659,7 +661,7 @@ class _MonthlyReportTab(tk.Frame):
             messagebox.showerror("Invalid", "Select a valid month first.")
             return
         plan = self._plan_var.get()
-        plan = plan if plan and plan != "All Plans" else None
+        plan = api.plan_filter_key(plan) if plan and plan != "All Plans" else None
         suffix = f"_{plan.replace(' ', '_')}" if plan else ""
         path = filedialog.asksaveasfilename(
             defaultextension=".pdf",
@@ -880,7 +882,7 @@ class _CustomReportTab(tk.Frame):
         if not rng:
             return
         plan = self._plan_var.get()
-        plan = plan if plan and plan != "All Plans" else None
+        plan = api.plan_filter_key(plan) if plan and plan != "All Plans" else None
         start, end = rng
         suffix = f"_{plan.replace(' ', '_')}" if plan else ""
         path = filedialog.asksaveasfilename(
