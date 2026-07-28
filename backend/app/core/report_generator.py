@@ -311,3 +311,136 @@ def generate_custom_pdf(start_str: str, end_str: str,
         subtitle=subtitle,
         client_purchases=client_purchases,
     )
+
+
+# ── XLSX ──────────────────────────────────────────────────────
+# Plain tabular data export — one row per line item, same underlying
+# purchases data as the PDF. Unlike the PDF's per-client grouped layout,
+# this is flat/sortable/filterable, which is what a spreadsheet is
+# actually good for (pivot tables, further filtering, etc. in Excel
+# itself) rather than trying to recreate the PDF's visual grouping.
+
+def _build_xlsx(title: str, subtitle: str,
+                client_purchases: list[dict]) -> bytes:
+    """
+    client_purchases: same shape as _build_pdf — list of {
+        client_name: str,
+        lines: [{name, qty, cost, is_subscription, is_locker}],
+        client_total: float
+    }
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sales Report"
+
+    header_fill = PatternFill(start_color="E8500A", end_color="E8500A",
+                              fill_type="solid")
+    header_font = Font(color="FFFFFF", bold=True)
+    bold = Font(bold=True)
+
+    ws.merge_cells("A1:E1")
+    ws["A1"] = title
+    ws["A1"].font = Font(bold=True, size=14)
+    ws.merge_cells("A2:E2")
+    ws["A2"] = subtitle
+    ws["A2"].font = Font(color="666666", size=10)
+
+    header_row = 4
+    columns = ["Client", "Item", "Type", "Qty", "Cost (\u20b1)"]
+    for col_idx, col_name in enumerate(columns, start=1):
+        cell = ws.cell(row=header_row, column=col_idx, value=col_name)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    row = header_row + 1
+    grand_total = 0.0
+    for purchase in client_purchases:
+        client_start_row = row
+        for line in purchase["lines"]:
+            item_type = ("Subscription" if line.get("is_subscription")
+                        else "Locker" if line.get("is_locker")
+                        else "Item")
+            ws.cell(row=row, column=1, value=purchase["client_name"])
+            ws.cell(row=row, column=2, value=line["name"])
+            ws.cell(row=row, column=3, value=item_type)
+            ws.cell(row=row, column=4, value=line["qty"])
+            cost_cell = ws.cell(row=row, column=5, value=round(line["cost"], 2))
+            cost_cell.number_format = "#,##0.00"
+            row += 1
+
+        # Per-client subtotal row, mirroring the PDF's "CLIENT TOTAL" line
+        ws.cell(row=row, column=1, value="")
+        total_label = ws.cell(row=row, column=4, value="Client Total")
+        total_label.font = bold
+        total_label.alignment = Alignment(horizontal="right")
+        total_cell = ws.cell(row=row, column=5,
+                             value=round(purchase["client_total"], 2))
+        total_cell.font = bold
+        total_cell.number_format = "#,##0.00"
+        for col in range(1, 6):
+            ws.cell(row=row, column=col).fill = PatternFill(
+                start_color="FFF0E8", end_color="FFF0E8", fill_type="solid")
+        grand_total += purchase["client_total"]
+        row += 2  # blank separator row between clients
+
+    row += 1
+    grand_label = ws.cell(row=row, column=4, value="GRAND TOTAL")
+    grand_label.font = Font(bold=True, size=12)
+    grand_label.alignment = Alignment(horizontal="right")
+    grand_cell = ws.cell(row=row, column=5, value=round(grand_total, 2))
+    grand_cell.font = Font(bold=True, size=12)
+    grand_cell.number_format = "#,##0.00"
+
+    widths = [22, 28, 14, 8, 14]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def generate_daily_xlsx(report_date: date, client_purchases: list[dict],
+                        plan: str | None = None) -> bytes:
+    subtitle = f"Date: {report_date.strftime('%B %d, %Y')}"
+    if plan:
+        subtitle += f"  |  Plan: {plan}"
+    return _build_xlsx(
+        title="Daily Sales Report",
+        subtitle=subtitle,
+        client_purchases=client_purchases,
+    )
+
+
+def generate_monthly_xlsx(year: int, month: int, client_purchases: list[dict],
+                          plan: str | None = None) -> bytes:
+    from calendar import month_name
+    subtitle = f"Month: {month_name[month]} {year}"
+    if plan:
+        subtitle += f"  |  Plan: {plan}"
+    return _build_xlsx(
+        title="Monthly Sales Report",
+        subtitle=subtitle,
+        client_purchases=client_purchases,
+    )
+
+
+def generate_custom_xlsx(start_str: str, end_str: str,
+                         client_purchases: list[dict],
+                         plan: str | None = None) -> bytes:
+    start = date.fromisoformat(start_str)
+    end   = date.fromisoformat(end_str)
+    subtitle = (f"Period: {start.strftime('%B %d, %Y')} "
+               f"to {end.strftime('%B %d, %Y')}")
+    if plan:
+        subtitle += f"  |  Plan: {plan}"
+    return _build_xlsx(
+        title="Custom Range Sales Report",
+        subtitle=subtitle,
+        client_purchases=client_purchases,
+    )

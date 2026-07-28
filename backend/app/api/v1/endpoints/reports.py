@@ -127,6 +127,28 @@ def get_daily_pdf(date_str: str,
     )
 
 
+@router.get("/daily/{date_str}/xlsx")
+def get_daily_xlsx(date_str: str,
+                   plan: str | None = Query(None),
+                   _: TokenData = Depends(require_admin)):
+    try:
+        d = date.fromisoformat(date_str)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Use YYYY-MM-DD format")
+
+    purchases = _build_purchases({date_str})
+    purchases = _filter_purchases_by_plan(purchases, plan)
+    from app.core.report_generator import generate_daily_xlsx
+    xlsx = generate_daily_xlsx(d, purchases, plan=plan)
+    return Response(
+        content=xlsx,
+        media_type="application/vnd.openxmlformats-officedocument"
+                   ".spreadsheetml.sheet",
+        headers={"Content-Disposition":
+                 f'attachment; filename="daily_{date_str}.xlsx"'},
+    )
+
+
 # ── Monthly ───────────────────────────────────────────────────
 
 @router.get("/monthly/{year}/{month}")
@@ -166,6 +188,28 @@ def get_monthly_pdf(year: int, month: int,
         media_type="application/pdf",
         headers={"Content-Disposition":
                  f'attachment; filename="report_{year}_{month:02d}.pdf"'},
+    )
+
+
+@router.get("/monthly/{year}/{month}/xlsx")
+def get_monthly_xlsx(year: int, month: int,
+                     plan: str | None = Query(None),
+                     _: TokenData = Depends(require_admin)):
+    _, last_day = monthrange(year, month)
+    date_strs   = {
+        date(year, month, d).isoformat()
+        for d in range(1, last_day + 1)
+    }
+    purchases = _build_purchases(date_strs)
+    purchases = _filter_purchases_by_plan(purchases, plan)
+    from app.core.report_generator import generate_monthly_xlsx
+    xlsx = generate_monthly_xlsx(year, month, purchases, plan=plan)
+    return Response(
+        content=xlsx,
+        media_type="application/vnd.openxmlformats-officedocument"
+                   ".spreadsheetml.sheet",
+        headers={"Content-Disposition":
+                 f'attachment; filename="report_{year}_{month:02d}.xlsx"'},
     )
 
 
@@ -217,4 +261,22 @@ def get_custom_pdf(start_str: str, end_str: str,
         media_type="application/pdf",
         headers={"Content-Disposition":
                  f'attachment; filename="report_{start_str}_to_{end_str}.pdf"'},
+    )
+
+
+@router.get("/custom/{start_str}/{end_str}/xlsx")
+def get_custom_xlsx(start_str: str, end_str: str,
+                    plan: str | None = Query(None),
+                    _: TokenData = Depends(require_admin)):
+    date_strs = _date_range_strs(start_str, end_str)
+    purchases = _build_purchases(date_strs)
+    purchases = _filter_purchases_by_plan(purchases, plan)
+    from app.core.report_generator import generate_custom_xlsx
+    xlsx = generate_custom_xlsx(start_str, end_str, purchases, plan=plan)
+    return Response(
+        content=xlsx,
+        media_type="application/vnd.openxmlformats-officedocument"
+                   ".spreadsheetml.sheet",
+        headers={"Content-Disposition":
+                 f'attachment; filename="report_{start_str}_to_{end_str}.xlsx"'},
     )

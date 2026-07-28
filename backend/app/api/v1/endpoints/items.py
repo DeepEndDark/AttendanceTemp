@@ -1,7 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from app.api.dependencies import require_admin, require_any
 from app.core.firestore_client import items
-from app.schemas.item import ItemCreate, ItemRead, ItemUpdate
+from app.schemas.item import (
+    ItemCreate, ItemRead, ItemUpdate, ItemCategoryUpdate,
+)
 from pydantic import BaseModel
 from app.schemas.token import TokenData
 
@@ -20,12 +22,30 @@ def _to_read(d: dict) -> ItemRead:
         stock=stock,
         reserved_stock=reserved,
         available_stock=max(0, stock - reserved),
+        category=d.get("category") or None,
     )
 
 
 @router.get("/", response_model=list[ItemRead])
 def list_items(_: TokenData = Depends(require_any)):
     return [_to_read(d.to_dict()) for d in items().stream()]
+
+
+@router.get("/categories", response_model=list[str])
+def list_item_categories(_: TokenData = Depends(require_any)):
+    """
+    Sorted list of every category currently in use. An item's category
+    is just an optional field on the item doc — there's no separate
+    categories collection — so this is derived by scanning items rather
+    than being its own source of truth. An item without a category is
+    simply omitted here; items are never required to belong to one.
+    """
+    names = {
+        d.to_dict().get("category")
+        for d in items().stream()
+        if d.to_dict().get("category")
+    }
+    return sorted(names)
 
 
 @router.get("/{item_name}", response_model=ItemRead)
@@ -42,7 +62,8 @@ def create_item(payload: ItemCreate, _: TokenData = Depends(require_admin)):
     if ref.get().exists:
         raise HTTPException(status_code=409, detail="Item already exists")
     data = {"item_name": payload.item_name, "price": payload.price,
-            "stock": payload.stock, "reserved_stock": 0}
+            "stock": payload.stock, "reserved_stock": 0,
+            "category": payload.category or None}
     ref.set(data)
     return _to_read(data)
 
@@ -54,7 +75,25 @@ def update_item(item_name: str, payload: ItemUpdate,
     if not ref.get().exists:
         raise HTTPException(status_code=404, detail="Item not found")
     updates = {k: v for k, v in payload.model_dump().items() if v is not None}
-    ref.update(updates)
+    if updates:
+        ref.update(updates)
+    return _to_read(ref.get().to_dict())
+
+
+@router.post("/{item_name}/category", response_model=ItemRead)
+def set_item_category(item_name: str, payload: ItemCategoryUpdate,
+                      _: TokenData = Depends(require_admin)):
+    """
+    Sets, moves, or clears an item's category — separate from the general
+    update_item PATCH because that endpoint's None-means-"unchanged"
+    convention can't express "remove this item from its category".
+    An empty/None category is valid: items don't have to belong to one,
+    and can switch freely between having one and not.
+    """
+    ref = items().document(item_name)
+    if not ref.get().exists:
+        raise HTTPException(status_code=404, detail="Item not found")
+    ref.update({"category": payload.category or None})
     return _to_read(ref.get().to_dict())
 
 

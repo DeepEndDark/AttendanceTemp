@@ -110,6 +110,8 @@ hidden = (
     + collect_submodules("reportlab")
     + collect_submodules("bcrypt")
     + collect_submodules("pydantic")
+    + collect_submodules("openpyxl")
+    + collect_submodules("et_xmlfile")
     + collect_submodules("pydantic_settings")
     + collect_submodules("starlette")
     + collect_submodules("fastapi")

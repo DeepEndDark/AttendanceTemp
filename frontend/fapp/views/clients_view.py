@@ -28,9 +28,10 @@ class ClientsView(tk.Frame):
                  font=("", 14, "bold"), bg="white").pack(side="left")
         tk.Button(bar, text="Refresh", command=self.refresh,
                   relief="flat", padx=10).pack(side="right", padx=4)
-        tk.Button(bar, text="Delete", command=self._delete,
-                  bg="#e04040", fg="white",
-                  relief="flat", padx=10).pack(side="right", padx=4)
+        if api.is_admin:
+            tk.Button(bar, text="Delete", command=self._delete,
+                      bg="#e04040", fg="white",
+                      relief="flat", padx=10).pack(side="right", padx=4)
         tk.Button(bar, text="Edit", command=self._edit,
                   relief="flat", padx=10).pack(side="right", padx=4)
         tk.Button(bar, text="Add Plan", command=self._add_plan,
@@ -343,6 +344,8 @@ class ClientsView(tk.Frame):
     # ---------------------------------------------------------
 
     def _delete(self):
+        if not api.is_admin:
+            return  # sales role has full client-list access except delete
         name = self._selected_name()
         if not name or self._loading:
             return

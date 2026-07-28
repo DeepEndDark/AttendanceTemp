@@ -325,6 +325,10 @@ class _DailyReportTab(tk.Frame):
                                   command=self._export_pdf,
                                   relief="flat", padx=10)
         self._pdf_btn.pack(side="left", padx=2)
+        self._xlsx_btn = tk.Button(ctrl, text="Export Excel",
+                                   command=self._export_xlsx,
+                                   relief="flat", padx=10)
+        self._xlsx_btn.pack(side="left", padx=2)
 
         tk.Label(ctrl, text="Plan:", bg="white").pack(side="left", padx=(10, 0))
         self._plan_var = tk.StringVar(value="All Plans")
@@ -390,6 +394,7 @@ class _DailyReportTab(tk.Frame):
         self._load_btn.config(state=state,
                               text="Loading..." if value else "Load")
         self._pdf_btn.config(state=state)
+        self._xlsx_btn.config(state=state)
         if text:
             self._summary_lbl.config(text=text, fg="gray")
 
@@ -476,6 +481,40 @@ class _DailyReportTab(tk.Frame):
                 "Error", msg))
         self.after(0, lambda: self._set_loading(False))
 
+    def _export_xlsx(self):
+        if self._loading:
+            return
+        plan = self._plan_var.get()
+        plan = api.plan_filter_key(plan) if plan and plan != "All Plans" else None
+        d = self._date_var.get().strip()
+        suffix = f"_{plan.replace(' ', '_')}" if plan else ""
+        path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx")],
+            initialfile=f"daily_{d}{suffix}.xlsx",
+            title="Save Daily Report")
+        if not path:
+            return
+        self._set_loading(True, "Generating Excel file...")
+        threading.Thread(target=self._xlsx_worker,
+                         args=(d, path, plan), daemon=True).start()
+
+    def _xlsx_worker(self, d: str, path: str, plan: str | None = None):
+        try:
+            xlsx = api.get_daily_xlsx(d, plan=plan)
+            with open(path, "wb") as f:
+                f.write(xlsx)
+            self.after(0, lambda: messagebox.showinfo(
+                "Exported", f"Saved to:\n{path}"))
+        except APIError as e:
+            msg = str(e)
+            self.after(0, lambda msg=msg: messagebox.showerror(
+                "Error", msg))
+        except Exception as e:
+            msg = str(e)
+            self.after(0, lambda msg=msg: messagebox.showerror(
+                "Error", msg))
+        self.after(0, lambda: self._set_loading(False))
 
 # ── Monthly tab ───────────────────────────────────────────────
 
@@ -520,6 +559,10 @@ class _MonthlyReportTab(tk.Frame):
                                   command=self._export_pdf,
                                   relief="flat", padx=10)
         self._pdf_btn.pack(side="left", padx=2)
+        self._xlsx_btn = tk.Button(ctrl, text="Export Excel",
+                                   command=self._export_xlsx,
+                                   relief="flat", padx=10)
+        self._xlsx_btn.pack(side="left", padx=2)
 
         tk.Label(ctrl, text="Plan:", bg="white").pack(side="left", padx=(10, 0))
         self._plan_var = tk.StringVar(value="All Plans")
@@ -593,6 +636,7 @@ class _MonthlyReportTab(tk.Frame):
         self._load_btn.config(state=state,
                               text="Loading..." if value else "Load")
         self._pdf_btn.config(state=state)
+        self._xlsx_btn.config(state=state)
         if text:
             self._summary_lbl.config(text=text, fg="gray")
 
@@ -691,6 +735,46 @@ class _MonthlyReportTab(tk.Frame):
                 "Error", msg))
         self.after(0, lambda: self._set_loading(False))
 
+    def _export_xlsx(self):
+        if self._loading:
+            return
+        try:
+            y = int(self._year_var.get())
+            m = int(self._month_var.get())
+        except ValueError:
+            messagebox.showerror("Invalid", "Select a valid month first.")
+            return
+        plan = self._plan_var.get()
+        plan = api.plan_filter_key(plan) if plan and plan != "All Plans" else None
+        suffix = f"_{plan.replace(' ', '_')}" if plan else ""
+        path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx")],
+            initialfile=f"monthly_{y}_{m:02d}{suffix}.xlsx",
+            title="Save Monthly Report")
+        if not path:
+            return
+        self._set_loading(True, "Generating Excel file...")
+        threading.Thread(target=self._xlsx_worker,
+                         args=(y, m, path, plan), daemon=True).start()
+
+    def _xlsx_worker(self, y: int, m: int, path: str, plan: str | None = None):
+        try:
+            xlsx = api.get_monthly_xlsx(y, m, plan=plan)
+            with open(path, "wb") as f:
+                f.write(xlsx)
+            self.after(0, lambda: messagebox.showinfo(
+                "Exported", f"Saved to:\n{path}"))
+        except APIError as e:
+            msg = str(e)
+            self.after(0, lambda msg=msg: messagebox.showerror(
+                "Error", msg))
+        except Exception as e:
+            msg = str(e)
+            self.after(0, lambda msg=msg: messagebox.showerror(
+                "Error", msg))
+        self.after(0, lambda: self._set_loading(False))
+
 # ── Custom range tab ──────────────────────────────────────────
 
 class _CustomReportTab(tk.Frame):
@@ -734,6 +818,10 @@ class _CustomReportTab(tk.Frame):
                                   command=self._export_pdf,
                                   relief="flat", padx=10)
         self._pdf_btn.pack(side="left", padx=2)
+        self._xlsx_btn = tk.Button(ctrl, text="Export Excel",
+                                   command=self._export_xlsx,
+                                   relief="flat", padx=10)
+        self._xlsx_btn.pack(side="left", padx=2)
 
         tk.Label(ctrl, text="Plan:", bg="white").pack(side="left", padx=(10, 0))
         self._plan_var = tk.StringVar(value="All Plans")
@@ -802,6 +890,7 @@ class _CustomReportTab(tk.Frame):
         self._load_btn.config(state=state,
                               text="Loading..." if value else "Load")
         self._pdf_btn.config(state=state)
+        self._xlsx_btn.config(state=state)
         if text:
             self._summary_lbl.config(text=text, fg="gray")
 
@@ -902,6 +991,44 @@ class _CustomReportTab(tk.Frame):
             pdf = api.get_custom_pdf(start, end, plan=plan)
             with open(path, "wb") as f:
                 f.write(pdf)
+            self.after(0, lambda: messagebox.showinfo(
+                "Exported", f"Saved to:\n{path}"))
+        except APIError as e:
+            msg = str(e)
+            self.after(0, lambda msg=msg: messagebox.showerror(
+                "Error", msg))
+        except Exception as e:
+            msg = str(e)
+            self.after(0, lambda msg=msg: messagebox.showerror(
+                "Error", msg))
+        self.after(0, lambda: self._set_loading(False))
+    def _export_xlsx(self):
+        if self._loading:
+            return
+        rng = self._validate_range()
+        if not rng:
+            return
+        plan = self._plan_var.get()
+        plan = api.plan_filter_key(plan) if plan and plan != "All Plans" else None
+        start, end = rng
+        suffix = f"_{plan.replace(' ', '_')}" if plan else ""
+        path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx")],
+            initialfile=f"report_{start}_to_{end}{suffix}.xlsx",
+            title="Save Custom Range Report")
+        if not path:
+            return
+        self._set_loading(True, "Generating Excel file...")
+        threading.Thread(target=self._xlsx_worker,
+                         args=(start, end, path, plan), daemon=True).start()
+
+    def _xlsx_worker(self, start: str, end: str, path: str,
+                     plan: str | None = None):
+        try:
+            xlsx = api.get_custom_xlsx(start, end, plan=plan)
+            with open(path, "wb") as f:
+                f.write(xlsx)
             self.after(0, lambda: messagebox.showinfo(
                 "Exported", f"Saved to:\n{path}"))
         except APIError as e:

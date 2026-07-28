@@ -269,11 +269,15 @@ def re_enroll(client_name: str, payload: ClientReEnroll,
         client=_doc_to_read(updated), warning=warning)
 
 
-# ── Update / Delete (admin only) ──────────────────────────────
+# ── Update (any role) / Delete (admin only) ────────────────────
+# Sales accounts get full access to the client list — including editing
+# client details — but cannot delete a client. Deletion also removes the
+# client's fingerprint from the local cache and is treated as a
+# destructive, admin-only action.
 
 @router.patch("/{client_name}", response_model=ClientRead)
 def update_client(client_name: str, payload: ClientUpdate,
-                  _: TokenData = Depends(require_admin)):
+                  _: TokenData = Depends(require_any)):
     ref = clients().document(client_name)
     if not ref.get().exists:
         raise HTTPException(status_code=404, detail="Client not found")

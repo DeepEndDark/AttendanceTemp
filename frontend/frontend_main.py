@@ -189,6 +189,7 @@ class App(tk.Tk):
         else:
             nav_items = [
                 ("Enroll Client",     EnrollView),
+                ("Client List",       ClientsView),
                 ("Sales",             SalesOpenView),
                 ("Locker Management", LockerView),
             ]

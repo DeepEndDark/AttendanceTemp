@@ -95,9 +95,18 @@ class LoginView(tk.Frame):
 
         tk.Label(form, text="Password", bg="white",
                  anchor="w").grid(row=2, column=0, sticky="w", pady=4)
-        self._pass = tk.Entry(form, show="*", width=28)
-        self._pass.grid(row=3, column=0, pady=(0, 16))
+        pass_row = tk.Frame(form, bg="white")
+        pass_row.grid(row=3, column=0, pady=(0, 16), sticky="ew")
+        self._pass = tk.Entry(pass_row, show="*", width=24)
+        self._pass.pack(side="left")
         self._pass.bind("<Return>", lambda _: self._login())
+        self._pass_visible = False
+        self._pass_toggle = tk.Label(
+            pass_row, text="Show", fg="#E8500A", bg="white",
+            font=("", 8, "underline"), cursor="hand2")
+        self._pass_toggle.pack(side="left", padx=(6, 0))
+        self._pass_toggle.bind("<Button-1>",
+                               lambda _e: self._toggle_password_visibility())
 
         self._sign_in_btn = tk.Button(
             form, text="Sign In", command=self._login,
@@ -111,6 +120,11 @@ class LoginView(tk.Frame):
 
         # Admin setup panel — built but hidden until requested
         self._setup_panel = None  # built lazily in _build_setup_panel()
+
+    def _toggle_password_visibility(self):
+        self._pass_visible = not self._pass_visible
+        self._pass.config(show="" if self._pass_visible else "*")
+        self._pass_toggle.config(text="Hide" if self._pass_visible else "Show")
 
     # ── Network / Firebase polling ─────────────────────────────
 
@@ -274,8 +288,23 @@ class LoginView(tk.Frame):
         user_entry.focus()
 
         tk.Label(pw_win, text="Password").pack(anchor="w", padx=16, pady=(8, 0))
-        pass_entry = tk.Entry(pw_win, show="*", width=30)
-        pass_entry.pack(padx=16)
+        setup_pass_row = tk.Frame(pw_win)
+        setup_pass_row.pack(padx=16, anchor="w")
+        pass_entry = tk.Entry(setup_pass_row, show="*", width=26)
+        pass_entry.pack(side="left")
+        setup_pass_visible = {"v": False}
+        setup_pass_toggle = tk.Label(
+            setup_pass_row, text="Show", fg="#E8500A",
+            font=("", 8, "underline"), cursor="hand2")
+        setup_pass_toggle.pack(side="left", padx=(6, 0))
+
+        def toggle_setup_pass(_e=None):
+            setup_pass_visible["v"] = not setup_pass_visible["v"]
+            pass_entry.config(show="" if setup_pass_visible["v"] else "*")
+            setup_pass_toggle.config(
+                text="Hide" if setup_pass_visible["v"] else "Show")
+
+        setup_pass_toggle.bind("<Button-1>", toggle_setup_pass)
 
         err_label = tk.Label(pw_win, text="", fg="red", font=("", 8))
         err_label.pack(pady=(6, 0))

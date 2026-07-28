@@ -708,13 +708,14 @@ class APIClient:
         c = self.cache.get("items", timeout=3)
         return c if c is not None else self._get("/items")
 
-    def create_item(self, name, price, stock):
+    def create_item(self, name, price, stock, category=None):
         r = self._post(
             "/items",
             {
                 "item_name": name,
                 "price": price,
                 "stock": stock,
+                "category": category or None,
             },
         )
         self._refresh_bg("items")
@@ -730,6 +731,19 @@ class APIClient:
             body["stock"] = stock
 
         r = self._patch(f"/items/{name}", body)
+        self._refresh_bg("items")
+        return r
+
+    def list_item_categories(self):
+        return self._get("/items/categories")
+
+    def set_item_category(self, name, category: str | None):
+        """
+        Sets, moves, or clears an item's category. Pass None (or "") to
+        remove the item from its category — items don't have to belong
+        to one, and can switch freely between having one and not.
+        """
+        r = self._post(f"/items/{name}/category", {"category": category or None})
         self._refresh_bg("items")
         return r
 
@@ -892,6 +906,17 @@ class APIClient:
         self._raise(r)
         return r.content
 
+    def get_daily_xlsx(self, date_str, plan: str | None = None) -> bytes:
+        params = {"plan": plan} if plan else None
+        r = self._request(lambda: self._session.get(
+            f"{BASE_URL}/reports/daily/{date_str}/xlsx",
+            headers=self._headers(),
+            params=params,
+            timeout=DEFAULT_TIMEOUT,
+        ))
+        self._raise(r)
+        return r.content
+
     def get_monthly_report(self, year, month):
         return self._get(f"/reports/monthly/{year}/{month}")
 
@@ -899,6 +924,17 @@ class APIClient:
         params = {"plan": plan} if plan else None
         r = self._request(lambda: self._session.get(
             f"{BASE_URL}/reports/monthly/{year}/{month}/pdf",
+            headers=self._headers(),
+            params=params,
+            timeout=DEFAULT_TIMEOUT,
+        ))
+        self._raise(r)
+        return r.content
+
+    def get_monthly_xlsx(self, year, month, plan: str | None = None) -> bytes:
+        params = {"plan": plan} if plan else None
+        r = self._request(lambda: self._session.get(
+            f"{BASE_URL}/reports/monthly/{year}/{month}/xlsx",
             headers=self._headers(),
             params=params,
             timeout=DEFAULT_TIMEOUT,
@@ -914,6 +950,18 @@ class APIClient:
         params = {"plan": plan} if plan else None
         r = self._request(lambda: self._session.get(
             f"{BASE_URL}/reports/custom/{start_str}/{end_str}/pdf",
+            headers=self._headers(),
+            params=params,
+            timeout=DEFAULT_TIMEOUT,
+        ))
+        self._raise(r)
+        return r.content
+
+    def get_custom_xlsx(self, start_str: str, end_str: str,
+                        plan: str | None = None) -> bytes:
+        params = {"plan": plan} if plan else None
+        r = self._request(lambda: self._session.get(
+            f"{BASE_URL}/reports/custom/{start_str}/{end_str}/xlsx",
             headers=self._headers(),
             params=params,
             timeout=DEFAULT_TIMEOUT,
