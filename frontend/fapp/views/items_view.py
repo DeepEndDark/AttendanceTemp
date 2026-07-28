@@ -10,6 +10,7 @@ class ItemsView(tk.Frame):
     def __init__(self, master, display_queue=None, **kwargs):
         super().__init__(master, bg="white")
         self._all_items: list[dict] = []
+        self._item_by_name: dict[str, dict] = {}
         self._build()
 
     def _build(self):
@@ -46,18 +47,21 @@ class ItemsView(tk.Frame):
         self._cat_filter_cb.bind("<<ComboboxSelected>>",
                                  lambda _e: self._apply_category_filter())
 
-        cols = ("name", "category", "price", "stock", "reserved", "available")
+        # Category is expressed as a group row header (like the date
+        # grouping used elsewhere in the app), not a column — so the
+        # "category" column that used to sit here has been removed.
+        cols = ("name", "price", "stock", "reserved", "available")
         self._tree = ttk.Treeview(self, columns=cols,
                                   show="headings", selectmode="browse")
         for col, txt, w in [
-            ("name", "Item Name", 190), ("category", "Category", 140),
-            ("price", "Price ₱", 90),
+            ("name", "Item Name", 220), ("price", "Price ₱", 90),
             ("stock", "Total Stock", 100), ("reserved", "Reserved", 90),
             ("available", "Available", 90),
         ]:
             self._tree.heading(col, text=txt)
             self._tree.column(col, width=w, anchor="center")
         self._tree.tag_configure("low", foreground="#A32D2D")
+        self._tree.tag_configure("cat_group", background="#FFF0E8")
 
         sb = ttk.Scrollbar(self, orient="vertical",
                            command=self._tree.yview)
@@ -75,6 +79,7 @@ class ItemsView(tk.Frame):
     def refresh(self):
         try:
             self._all_items = api.list_items()
+            self._item_by_name = {it["item_name"]: it for it in self._all_items}
             categories = api.list_item_categories()
             current = self._cat_filter_var.get()
             values = ["All Categories"] + categories + [UNCATEGORIZED]
@@ -96,23 +101,43 @@ class ItemsView(tk.Frame):
                       if it.get("category") == cat]
 
         self._tree.delete(*self._tree.get_children())
+
+        by_cat: dict[str, list[dict]] = {}
         for it in visible:
-            avail = it.get("available_stock",
-                           it["stock"] - it.get("reserved_stock", 0))
-            tag = "low" if avail <= 2 else ""
-            self._tree.insert("", "end", tags=(tag,), values=(
-                it["item_name"], it.get("category") or "",
-                f"{it['price']:.2f}",
-                it["stock"], it.get("reserved_stock", 0), avail))
+            by_cat.setdefault(it.get("category") or UNCATEGORIZED, []).append(it)
+
+        for cat_name in sorted(by_cat.keys(),
+                              key=lambda c: (c == UNCATEGORIZED, c)):
+            catiid = f"cat_{cat_name}"
+            group_items = sorted(by_cat[cat_name],
+                                 key=lambda it: it["item_name"])
+            self._tree.insert("", "end", iid=catiid,
+                              values=(f"{cat_name}  ({len(group_items)})",
+                                      "", "", "", ""),
+                              tags=("cat_group",))
+            for it in group_items:
+                avail = it.get("available_stock",
+                               it["stock"] - it.get("reserved_stock", 0))
+                tag = "low" if avail <= 2 else ""
+                # Item name is unique, so it doubles as the row iid —
+                # this makes looking an item back up (for edit/delete/
+                # move) trivial without parsing displayed row values.
+                self._tree.insert(catiid, "end", iid=it["item_name"],
+                                  tags=(tag,), values=(
+                                      it["item_name"], f"{it['price']:.2f}",
+                                      it["stock"], it.get("reserved_stock", 0),
+                                      avail))
+            self._tree.item(catiid, open=True)
+
         self._status.config(
             text=f"{len(visible)} of {len(self._all_items)} item(s)")
 
     def _selected_name(self):
         sel = self._tree.selection()
-        if not sel:
+        if not sel or sel[0].startswith("cat_"):
             messagebox.showwarning("Select", "Select an item first.")
             return None
-        return self._tree.item(sel[0])["values"][0]
+        return sel[0]
 
     def _add(self):
         try:
@@ -152,16 +177,16 @@ class ItemsView(tk.Frame):
         name = self._selected_name()
         if not name:
             return
-        row = self._tree.item(self._tree.selection()[0])["values"]
-        # Row layout: (name, category, price, stock, reserved, available)
-        current_category = row[1] or None
+        item = self._item_by_name.get(name, {})
+        current_category = item.get("category") or None
         try:
             categories = api.list_item_categories()
         except APIError:
             categories = []
         dlg = _ItemDialog(self, "Edit Item",
                           data={"item_name": name,
-                                "price": row[2], "stock": row[3],
+                                "price": item.get("price"),
+                                "stock": item.get("stock"),
                                 "category": current_category},
                           categories=categories)
         if dlg.result:
@@ -185,8 +210,7 @@ class ItemsView(tk.Frame):
         name = self._selected_name()
         if not name:
             return
-        row = self._tree.item(self._tree.selection()[0])["values"]
-        current_category = row[1] or None
+        current_category = self._item_by_name.get(name, {}).get("category")
         try:
             categories = api.list_item_categories()
         except APIError:
@@ -322,4 +346,83 @@ class _CategoryPickerDialog(tk.Toplevel):
         # "" is a valid, meaningful result here (clear the category) —
         # distinct from None, which _move_category treats as "cancelled".
         self.result = self._category_var.get().strip()
+        self.destroy()
+
+
+class ItemPickerDialog(tk.Toplevel):
+    """
+    Reusable category-grouped item picker for the sales screens — items
+    are organized under category header rows (matching the Item
+    Catalogue's own grouping, and the date-header pattern already used
+    elsewhere in the app for logs/sales) instead of a flat alphabetical
+    dropdown, so a large catalogue stays browsable while ringing up a
+    sale. Only items with available stock are shown, since those are the
+    only ones a sale can actually be added for.
+
+    Usage: dlg = ItemPickerDialog(parent, items); if dlg.result: ... —
+    dlg.result is the chosen item_name, or None if cancelled.
+    """
+    def __init__(self, parent, items: list[dict], title="Pick an Item"):
+        super().__init__(parent)
+        self.title(title)
+        self.resizable(False, False)
+        set_window_icon(self)
+        self.grab_set()
+        self.result: str | None = None
+
+        tk.Label(self, text="Double-click an item, or select and click Choose.",
+                 fg="gray", font=("", 8)).pack(padx=12, pady=(10, 4), anchor="w")
+
+        cols = ("name", "price", "available")
+        tree = ttk.Treeview(self, columns=cols, show="headings",
+                            selectmode="browse", height=14)
+        tree.heading("name", text="Item")
+        tree.column("name", width=220, anchor="w")
+        tree.heading("price", text="Price ₱")
+        tree.column("price", width=90, anchor="center")
+        tree.heading("available", text="Available")
+        tree.column("available", width=90, anchor="center")
+        tree.tag_configure("cat_group", background="#FFF0E8")
+        tree.grid(row=1, column=0, columnspan=2, padx=12, pady=4,
+                 sticky="nsew")
+        self.rowconfigure(1, weight=1)
+        self.columnconfigure(0, weight=1)
+        self._tree = tree
+
+        by_cat: dict[str, list[dict]] = {}
+        for it in items:
+            if it.get("available_stock", 0) <= 0:
+                continue
+            by_cat.setdefault(it.get("category") or UNCATEGORIZED, []) \
+                  .append(it)
+
+        for cat_name in sorted(by_cat.keys(),
+                              key=lambda c: (c == UNCATEGORIZED, c)):
+            catiid = f"cat_{cat_name}"
+            group_items = sorted(by_cat[cat_name],
+                                 key=lambda it: it["item_name"])
+            tree.insert("", "end", iid=catiid,
+                       values=(f"{cat_name}  ({len(group_items)})", "", ""),
+                       tags=("cat_group",))
+            for it in group_items:
+                tree.insert(catiid, "end", iid=it["item_name"], values=(
+                    it["item_name"], f"{it['price']:.2f}",
+                    it.get("available_stock", 0)))
+            tree.item(catiid, open=True)
+
+        tree.bind("<Double-Button-1>", lambda _e: self._choose())
+
+        btn = tk.Frame(self)
+        btn.grid(row=2, column=0, columnspan=2, pady=10)
+        tk.Button(btn, text="Choose", command=self._choose,
+                  width=12).pack(side="left", padx=6)
+        tk.Button(btn, text="Cancel", command=self.destroy,
+                  width=10).pack(side="left", padx=6)
+        self.wait_window()
+
+    def _choose(self):
+        sel = self._tree.selection()
+        if not sel or sel[0].startswith("cat_"):
+            return
+        self.result = sel[0]
         self.destroy()

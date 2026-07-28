@@ -5,6 +5,7 @@ from tkinter import ttk, messagebox
 
 from fapp.api_client import api, APIError
 from fapp.views.admin_attendance_view import set_window_icon
+from fapp.views.items_view import ItemPickerDialog
 
 
 class SalesOpenView(tk.Frame):
@@ -13,6 +14,7 @@ class SalesOpenView(tk.Frame):
         self._queue = display_queue
         self._selected_uid: int | None = None
         self._all_sales: list[dict] = []
+        self._all_items: list[dict] = []
         self._sale_map: dict[int, dict] = {}
         self._loading = False
         self._detail_loading_uid: int | None = None
@@ -75,9 +77,15 @@ class SalesOpenView(tk.Frame):
         add_bar.grid(row=0, column=0, sticky="ew", padx=8, pady=6)
         tk.Label(add_bar, text="Item:", bg="white").pack(side="left")
         self._item_var = tk.StringVar()
-        self._item_cb = ttk.Combobox(add_bar, textvariable=self._item_var,
-                                     width=18, state="readonly")
-        self._item_cb.pack(side="left", padx=4)
+        # Read-only display of the currently picked item — actual
+        # selection happens via the category-grouped picker dialog below,
+        # so a large catalogue stays browsable instead of one long flat
+        # alphabetical dropdown.
+        self._item_display = tk.Entry(add_bar, textvariable=self._item_var,
+                                      width=18, state="readonly")
+        self._item_display.pack(side="left", padx=4)
+        tk.Button(add_bar, text="Pick Item...", command=self._pick_item,
+                  relief="flat", padx=6).pack(side="left")
         tk.Label(add_bar, text="Qty:", bg="white").pack(side="left",
                                                         padx=(8, 2))
         self._qty_var = tk.StringVar(value="1")
@@ -169,9 +177,7 @@ class SalesOpenView(tk.Frame):
         sales: list[dict],
         preserve_uid: int | None,
     ):
-        self._item_cb["values"] = [
-            i["item_name"] for i in items if i.get("available_stock", 0) > 0
-        ]
+        self._all_items = items
 
         # Only open sales whose client is currently timed in
         visible = [s for s in sales if s.get("client_name") in active]
@@ -320,6 +326,11 @@ class SalesOpenView(tk.Frame):
     # ---------------------------------------------------------
     # Add item
     # ---------------------------------------------------------
+
+    def _pick_item(self):
+        dlg = ItemPickerDialog(self, self._all_items)
+        if dlg.result:
+            self._item_var.set(dlg.result)
 
     def _add_item(self):
         if self._loading:

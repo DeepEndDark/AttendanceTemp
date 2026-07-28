@@ -5,6 +5,7 @@ from datetime import date
 
 from fapp.api_client import api, APIError
 from fapp.views.admin_attendance_view import _CalPicker, _make_date_entry
+from fapp.views.items_view import ItemPickerDialog
 
 
 class AdminSalesView(tk.Frame):
@@ -13,6 +14,7 @@ class AdminSalesView(tk.Frame):
 
         self._selected_uid: int | None = None
         self._all_sales: list[dict] = []
+        self._all_items: list[dict] = []
         self._all_clients: list[dict] = []
         self._client_plan_map: dict[str, list[str]] = {}
         self._sale_map: dict[int, dict] = {}
@@ -230,14 +232,20 @@ class AdminSalesView(tk.Frame):
 
         self._add_item_var = tk.StringVar()
 
-        self._add_item_cb = ttk.Combobox(
+        # Read-only display of the currently picked item — actual
+        # selection happens via the category-grouped picker dialog, so a
+        # large catalogue stays browsable instead of one long flat
+        # alphabetical dropdown.
+        self._add_item_display = tk.Entry(
             add_bar,
             textvariable=self._add_item_var,
             width=14,
             state="readonly"
         )
+        self._add_item_display.pack(side="left", padx=4)
 
-        self._add_item_cb.pack(side="left", padx=4)
+        tk.Button(add_bar, text="Pick Item...", command=self._pick_item,
+                  relief="flat", padx=6).pack(side="left")
 
         tk.Label(add_bar, text="Qty:", bg="white").pack(side="left")
 
@@ -424,11 +432,7 @@ class AdminSalesView(tk.Frame):
         clients_list: list[dict] | None = None,
         subs: list[dict] | None = None,
     ):
-        self._add_item_cb["values"] = [
-            i["item_name"]
-            for i in items
-            if i.get("available_stock", 0) > 0
-        ]
+        self._all_items = items
 
         self._all_sales = sales
 
@@ -898,6 +902,11 @@ class AdminSalesView(tk.Frame):
     # ---------------------------------------------------------
     # Add / remove items
     # ---------------------------------------------------------
+
+    def _pick_item(self):
+        dlg = ItemPickerDialog(self, self._all_items)
+        if dlg.result:
+            self._add_item_var.set(dlg.result)
 
     def _add_item(self):
         if self._loading:
