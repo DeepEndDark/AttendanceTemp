@@ -19,16 +19,17 @@ class SubscriptionsView(tk.Frame):
                  font=("", 14, "bold"), bg="white").pack(side="left")
         tk.Button(bar, text="Refresh", command=self.refresh,
                   relief="flat", padx=10).pack(side="right", padx=4)
-        tk.Button(bar, text="Delete", command=self._delete,
-                  bg="#e04040", fg="white",
-                  relief="flat", padx=10).pack(side="right", padx=4)
-        tk.Button(bar, text="Rename", command=self._rename,
-                  relief="flat", padx=10).pack(side="right", padx=4)
-        tk.Button(bar, text="Edit", command=self._edit,
-                  relief="flat", padx=10).pack(side="right", padx=4)
-        tk.Button(bar, text="Add Plan", command=self._add,
-                  bg="#E8500A", fg="white",
-                  relief="flat", padx=10).pack(side="right", padx=4)
+        if api.is_admin:
+            tk.Button(bar, text="Delete", command=self._delete,
+                      bg="#e04040", fg="white",
+                      relief="flat", padx=10).pack(side="right", padx=4)
+            tk.Button(bar, text="Rename", command=self._rename,
+                      relief="flat", padx=10).pack(side="right", padx=4)
+            tk.Button(bar, text="Edit", command=self._edit,
+                      relief="flat", padx=10).pack(side="right", padx=4)
+            tk.Button(bar, text="Add Plan", command=self._add,
+                      bg="#E8500A", fg="white",
+                      relief="flat", padx=10).pack(side="right", padx=4)
 
         cols = ("name", "days", "price", "trainer",
                 "trainer_days", "hardcap")
@@ -80,6 +81,8 @@ class SubscriptionsView(tk.Frame):
         return self._tree.item(sel[0])["values"][0]
 
     def _add(self):
+        if not api.is_admin:
+            return
         dlg = _SubDialog(self, "Add Plan")
         if dlg.result:
             try:
@@ -89,6 +92,8 @@ class SubscriptionsView(tk.Frame):
                 messagebox.showerror("Error", str(e))
 
     def _rename(self):
+        if not api.is_admin:
+            return
         name = self._selected_name()
         if not name:
             return
@@ -109,6 +114,8 @@ class SubscriptionsView(tk.Frame):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _edit(self):
+        if not api.is_admin:
+            return
         name = self._selected_name()
         if not name:
             return
@@ -130,6 +137,8 @@ class SubscriptionsView(tk.Frame):
                 messagebox.showerror("Error", str(e))
 
     def _delete(self):
+        if not api.is_admin:
+            return
         name = self._selected_name()
         if not name:
             return

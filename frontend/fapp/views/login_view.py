@@ -16,6 +16,37 @@ from fapp.views.admin_attendance_view import set_window_icon
 
 POLL_INTERVAL_MS = 5_000   # 5 seconds between pings
 
+_EYE_ICON_W, _EYE_ICON_H = 22, 16
+
+
+def _draw_eye_icon(canvas: tk.Canvas, currently_visible: bool,
+                   color: str = "#E8500A"):
+    """
+    Draws a small Material-style "eye" / "eye-off" glyph on a Canvas —
+    hand-drawn with plain Tk primitives rather than a Unicode emoji glyph,
+    since emoji-font rendering (and its availability at all) is
+    inconsistent across Windows versions and in PyInstaller-bundled Tk,
+    while this renders identically everywhere.
+
+    currently_visible=True means the password IS currently shown, so this
+    draws the "eye-off" (slashed) icon — the affordance to hide it again.
+    currently_visible=False draws the plain open eye — the affordance to
+    reveal it.
+    """
+    canvas.delete("all")
+    # Almond-shaped eye outline via two smoothed curves meeting at the
+    # inner/outer corners.
+    canvas.create_line(2, 8, 7, 3, 15, 3, 20, 8,
+                       smooth=True, fill=color, width=1.6,
+                       capstyle="round")
+    canvas.create_line(2, 8, 7, 13, 15, 13, 20, 8,
+                       smooth=True, fill=color, width=1.6,
+                       capstyle="round")
+    canvas.create_oval(9, 6, 13, 10, outline=color, fill=color)
+    if currently_visible:
+        canvas.create_line(2, 13, 20, 3, fill=color, width=1.8,
+                           capstyle="round")
+
 
 class LoginView(tk.Frame):
     def __init__(self, master, on_success):
@@ -101,10 +132,11 @@ class LoginView(tk.Frame):
         self._pass.pack(side="left")
         self._pass.bind("<Return>", lambda _: self._login())
         self._pass_visible = False
-        self._pass_toggle = tk.Label(
-            pass_row, text="Show", fg="#E8500A", bg="white",
-            font=("", 8, "underline"), cursor="hand2")
+        self._pass_toggle = tk.Canvas(
+            pass_row, width=_EYE_ICON_W, height=_EYE_ICON_H,
+            bg="white", highlightthickness=0, cursor="hand2")
         self._pass_toggle.pack(side="left", padx=(6, 0))
+        _draw_eye_icon(self._pass_toggle, self._pass_visible)
         self._pass_toggle.bind("<Button-1>",
                                lambda _e: self._toggle_password_visibility())
 
@@ -124,7 +156,7 @@ class LoginView(tk.Frame):
     def _toggle_password_visibility(self):
         self._pass_visible = not self._pass_visible
         self._pass.config(show="" if self._pass_visible else "*")
-        self._pass_toggle.config(text="Hide" if self._pass_visible else "Show")
+        _draw_eye_icon(self._pass_toggle, self._pass_visible)
 
     # ── Network / Firebase polling ─────────────────────────────
 
@@ -293,16 +325,17 @@ class LoginView(tk.Frame):
         pass_entry = tk.Entry(setup_pass_row, show="*", width=26)
         pass_entry.pack(side="left")
         setup_pass_visible = {"v": False}
-        setup_pass_toggle = tk.Label(
-            setup_pass_row, text="Show", fg="#E8500A",
-            font=("", 8, "underline"), cursor="hand2")
+        setup_pass_toggle = tk.Canvas(
+            setup_pass_row, width=_EYE_ICON_W, height=_EYE_ICON_H,
+            bg=setup_pass_row.cget("bg"), highlightthickness=0,
+            cursor="hand2")
         setup_pass_toggle.pack(side="left", padx=(6, 0))
+        _draw_eye_icon(setup_pass_toggle, False)
 
         def toggle_setup_pass(_e=None):
             setup_pass_visible["v"] = not setup_pass_visible["v"]
             pass_entry.config(show="" if setup_pass_visible["v"] else "*")
-            setup_pass_toggle.config(
-                text="Hide" if setup_pass_visible["v"] else "Show")
+            _draw_eye_icon(setup_pass_toggle, setup_pass_visible["v"])
 
         setup_pass_toggle.bind("<Button-1>", toggle_setup_pass)
 

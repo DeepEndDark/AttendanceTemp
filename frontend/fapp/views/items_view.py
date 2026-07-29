@@ -23,18 +23,19 @@ class ItemsView(tk.Frame):
                  font=("", 14, "bold"), bg="white").pack(side="left")
         tk.Button(bar, text="Refresh", command=self.refresh,
                   relief="flat", padx=10).pack(side="right", padx=4)
-        tk.Button(bar, text="Delete", command=self._delete,
-                  bg="#e04040", fg="white",
-                  relief="flat", padx=10).pack(side="right", padx=4)
-        tk.Button(bar, text="Rename", command=self._rename,
-                  relief="flat", padx=10).pack(side="right", padx=4)
-        tk.Button(bar, text="Move to Category", command=self._move_category,
-                  relief="flat", padx=10).pack(side="right", padx=4)
-        tk.Button(bar, text="Edit", command=self._edit,
-                  relief="flat", padx=10).pack(side="right", padx=4)
-        tk.Button(bar, text="Add Item", command=self._add,
-                  bg="#185FA5", fg="white",
-                  relief="flat", padx=10).pack(side="right", padx=4)
+        if api.is_admin:
+            tk.Button(bar, text="Delete", command=self._delete,
+                      bg="#e04040", fg="white",
+                      relief="flat", padx=10).pack(side="right", padx=4)
+            tk.Button(bar, text="Rename", command=self._rename,
+                      relief="flat", padx=10).pack(side="right", padx=4)
+            tk.Button(bar, text="Move to Category", command=self._move_category,
+                      relief="flat", padx=10).pack(side="right", padx=4)
+            tk.Button(bar, text="Edit", command=self._edit,
+                      relief="flat", padx=10).pack(side="right", padx=4)
+            tk.Button(bar, text="Add Item", command=self._add,
+                      bg="#185FA5", fg="white",
+                      relief="flat", padx=10).pack(side="right", padx=4)
 
         filt = tk.Frame(self, bg="white")
         filt.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 4))
@@ -140,6 +141,8 @@ class ItemsView(tk.Frame):
         return sel[0]
 
     def _add(self):
+        if not api.is_admin:
+            return
         try:
             categories = api.list_item_categories()
         except APIError:
@@ -153,6 +156,8 @@ class ItemsView(tk.Frame):
                 messagebox.showerror("Error", str(e))
 
     def _rename(self):
+        if not api.is_admin:
+            return
         name = self._selected_name()
         if not name:
             return
@@ -174,6 +179,8 @@ class ItemsView(tk.Frame):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _edit(self):
+        if not api.is_admin:
+            return
         name = self._selected_name()
         if not name:
             return
@@ -202,6 +209,8 @@ class ItemsView(tk.Frame):
                 messagebox.showerror("Error", str(e))
 
     def _move_category(self):
+        if not api.is_admin:
+            return
         """
         Quick action for reassigning an existing item's category without
         opening the full edit dialog — covers "add existing items to a
@@ -225,6 +234,8 @@ class ItemsView(tk.Frame):
                 messagebox.showerror("Error", str(e))
 
     def _delete(self):
+        if not api.is_admin:
+            return
         name = self._selected_name()
         if not name:
             return

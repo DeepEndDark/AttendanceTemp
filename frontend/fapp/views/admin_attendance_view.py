@@ -269,9 +269,10 @@ class AdminAttendanceView(tk.Frame):
                                      relief="flat", padx=10)
         self._export_btn.pack(side="right", padx=4)
 
-        tk.Button(bar, text="Delete Log", command=self._delete_log,
-                  bg="#8B1E1E", fg="white",
-                  relief="flat", padx=10).pack(side="right", padx=4)
+        if api.is_admin:
+            tk.Button(bar, text="Delete Log", command=self._delete_log,
+                      bg="#8B1E1E", fg="white",
+                      relief="flat", padx=10).pack(side="right", padx=4)
         tk.Button(bar, text="Time-Out", command=self._time_out,
                   bg="#f0a030", relief="flat", padx=10).pack(side="right", padx=4)
         tk.Button(bar, text="Time-In", command=self._time_in,
@@ -847,6 +848,8 @@ class AdminAttendanceView(tk.Frame):
     # ---------------------------------------------------------
 
     def _delete_log(self):
+        if not api.is_admin:
+            return
         if self._loading:
             return
         uids = self._selected_log_uids()

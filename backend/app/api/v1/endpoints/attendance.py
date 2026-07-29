@@ -76,7 +76,7 @@ def _fetch_all_logs(
     )
 
 
-# ── Admin: view logs ──────────────────────────────────────────
+# ── View logs (any role) — delete stays admin-only, see below ─
 
 @router.get("/", response_model=list[AttendanceLogRead])
 def list_all_attendance(
@@ -84,7 +84,7 @@ def list_all_attendance(
     date_from: str | None = None,
     date_to: str | None = None,
     date_exact: str | None = None,
-    _: TokenData = Depends(require_admin),
+    _: TokenData = Depends(require_any),
 ):
     return [_to_read(l) for l in _fetch_all_logs(
         client_name=client_name,

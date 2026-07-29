@@ -162,7 +162,6 @@ class App(tk.Tk):
         self._build_nav()
 
     def _build_nav(self):
-        from fapp.views.enroll_view import EnrollView
         from fapp.views.sales_open_view import SalesOpenView
         from fapp.views.admin_attendance_view import AdminAttendanceView
         from fapp.views.admin_sales_view import AdminSalesView
@@ -188,9 +187,11 @@ class App(tk.Tk):
             ]
         else:
             nav_items = [
-                ("Enroll Client",     EnrollView),
+                ("Attendance Logs",   AdminAttendanceView),
                 ("Client List",       ClientsView),
                 ("Sales",             SalesOpenView),
+                ("Item Catalogue",    ItemsView),
+                ("Subscription Plans", SubscriptionsView),
                 ("Locker Management", LockerView),
             ]
 
