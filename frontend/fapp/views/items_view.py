@@ -6,6 +6,36 @@ from fapp.views.admin_attendance_view import set_window_icon
 UNCATEGORIZED = "(Uncategorized)"
 
 
+def group_items_by_category(items: list[dict],
+                            only_available: bool = False) -> dict[str, list[dict]]:
+    """
+    Groups items by category into an ordered dict — real categories
+    first (alphabetically), Uncategorized always last regardless of
+    where "(Uncategorized)" would normally sort as a string. Each
+    group's items are sorted by name.
+
+    only_available=True excludes items with zero available stock —
+    used wherever the list is for *selling* (nothing to add to a cart
+    if there's none left), but not for the Item Catalogue management
+    view itself, where an out-of-stock item still needs to be visible
+    and editable.
+
+    Shared by ItemsView, ItemPickerDialog, and the persistent item-
+    picker box on both sales screens, so all four places group/sort
+    identically rather than drifting out of sync with each other.
+    """
+    by_cat: dict[str, list[dict]] = {}
+    for it in items:
+        if only_available and it.get("available_stock", 0) <= 0:
+            continue
+        by_cat.setdefault(it.get("category") or UNCATEGORIZED, []).append(it)
+
+    ordered: dict[str, list[dict]] = {}
+    for cat_name in sorted(by_cat.keys(), key=lambda c: (c == UNCATEGORIZED, c)):
+        ordered[cat_name] = sorted(by_cat[cat_name], key=lambda it: it["item_name"])
+    return ordered
+
+
 class ItemsView(tk.Frame):
     def __init__(self, master, display_queue=None, **kwargs):
         super().__init__(master, bg="white")
@@ -103,15 +133,9 @@ class ItemsView(tk.Frame):
 
         self._tree.delete(*self._tree.get_children())
 
-        by_cat: dict[str, list[dict]] = {}
-        for it in visible:
-            by_cat.setdefault(it.get("category") or UNCATEGORIZED, []).append(it)
-
-        for cat_name in sorted(by_cat.keys(),
-                              key=lambda c: (c == UNCATEGORIZED, c)):
+        by_cat = group_items_by_category(visible)
+        for cat_name, group_items in by_cat.items():
             catiid = f"cat_{cat_name}"
-            group_items = sorted(by_cat[cat_name],
-                                 key=lambda it: it["item_name"])
             self._tree.insert("", "end", iid=catiid,
                               values=(f"{cat_name}  ({len(group_items)})",
                                       "", "", "", ""),
@@ -401,18 +425,9 @@ class ItemPickerDialog(tk.Toplevel):
         self.columnconfigure(0, weight=1)
         self._tree = tree
 
-        by_cat: dict[str, list[dict]] = {}
-        for it in items:
-            if it.get("available_stock", 0) <= 0:
-                continue
-            by_cat.setdefault(it.get("category") or UNCATEGORIZED, []) \
-                  .append(it)
-
-        for cat_name in sorted(by_cat.keys(),
-                              key=lambda c: (c == UNCATEGORIZED, c)):
+        by_cat = group_items_by_category(items, only_available=True)
+        for cat_name, group_items in by_cat.items():
             catiid = f"cat_{cat_name}"
-            group_items = sorted(by_cat[cat_name],
-                                 key=lambda it: it["item_name"])
             tree.insert("", "end", iid=catiid,
                        values=(f"{cat_name}  ({len(group_items)})", "", ""),
                        tags=("cat_group",))

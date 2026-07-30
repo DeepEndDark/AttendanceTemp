@@ -5,7 +5,7 @@ from tkinter import ttk, messagebox
 
 from fapp.api_client import api, APIError
 from fapp.views.admin_attendance_view import set_window_icon
-from fapp.views.items_view import ItemPickerDialog
+from fapp.views.items_view import group_items_by_category
 
 
 class SalesOpenView(tk.Frame):
@@ -40,10 +40,11 @@ class SalesOpenView(tk.Frame):
         split = tk.Frame(self, bg="white")
         split.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 12))
         split.columnconfigure(0, weight=2)
-        split.columnconfigure(1, weight=3)
+        split.columnconfigure(1, weight=2)
+        split.columnconfigure(2, weight=3)
         split.rowconfigure(0, weight=1)
 
-        # ── Left: open sales list ─────────────────────────────
+        # ── Box 1: open sales list ────────────────────────────
         left = tk.LabelFrame(split, text="Open sales", bg="white")
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         left.rowconfigure(0, weight=1)
@@ -66,35 +67,55 @@ class SalesOpenView(tk.Frame):
         sb.grid(row=0, column=1, sticky="ns")
         self._sale_tree.bind("<<TreeviewSelect>>", self._on_select)
 
-        # ── Right: cart ───────────────────────────────────────
+        # ── Box 2: item catalogue — select + add directly ────
+        middle = tk.LabelFrame(split, text="Item Catalogue", bg="white")
+        middle.grid(row=0, column=1, sticky="nsew", padx=6)
+        middle.rowconfigure(0, weight=1)
+        middle.columnconfigure(0, weight=1)
+
+        ccols = ("name", "price", "available")
+        self._catalog_tree = ttk.Treeview(middle, columns=ccols,
+                                          show="headings",
+                                          selectmode="browse")
+        for col, txt, w in [("name", "Item", 150), ("price", "Price ₱", 70),
+                            ("available", "Avail.", 60)]:
+            self._catalog_tree.heading(col, text=txt)
+            self._catalog_tree.column(col, width=w, anchor="center")
+        self._catalog_tree.column("name", anchor="w")
+        self._catalog_tree.tag_configure("cat_group", background="#FFF0E8")
+        catsb = ttk.Scrollbar(middle, orient="vertical",
+                              command=self._catalog_tree.yview)
+        self._catalog_tree.configure(yscrollcommand=catsb.set)
+        self._catalog_tree.grid(row=0, column=0, sticky="nsew")
+        catsb.grid(row=0, column=1, sticky="ns")
+        # Double-click adds instantly with qty 1; typing a qty below and
+        # clicking Add covers larger quantities without an extra dialog.
+        self._catalog_tree.bind("<Double-Button-1>",
+                               lambda _e: self._catalog_double_click())
+
+        cat_add_bar = tk.Frame(middle, bg="white")
+        cat_add_bar.grid(row=1, column=0, columnspan=2, sticky="ew",
+                         padx=6, pady=6)
+        tk.Label(cat_add_bar, text="Qty:", bg="white").pack(side="left")
+        self._qty_var = tk.StringVar(value="1")
+        tk.Entry(cat_add_bar, textvariable=self._qty_var,
+                 width=5).pack(side="left", padx=(2, 8))
+        tk.Button(cat_add_bar, text="Add to Sale",
+                  command=self._add_from_catalog,
+                  bg="#0F6E56", fg="white",
+                  relief="flat", padx=8).pack(side="left")
+
+        # ── Box 3: items in the selected sale + total ─────────
         right = tk.LabelFrame(split, text="Items in selected sale",
                               bg="white")
-        right.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        right.grid(row=0, column=2, sticky="nsew", padx=(6, 0))
         right.rowconfigure(1, weight=1)
         right.columnconfigure(0, weight=1)
 
-        add_bar = tk.Frame(right, bg="white")
-        add_bar.grid(row=0, column=0, sticky="ew", padx=8, pady=6)
-        tk.Label(add_bar, text="Item:", bg="white").pack(side="left")
-        self._item_var = tk.StringVar()
-        # Read-only display of the currently picked item — actual
-        # selection happens via the category-grouped picker dialog below,
-        # so a large catalogue stays browsable instead of one long flat
-        # alphabetical dropdown.
-        self._item_display = tk.Entry(add_bar, textvariable=self._item_var,
-                                      width=18, state="readonly")
-        self._item_display.pack(side="left", padx=4)
-        tk.Button(add_bar, text="Pick Item...", command=self._pick_item,
-                  relief="flat", padx=6).pack(side="left")
-        tk.Label(add_bar, text="Qty:", bg="white").pack(side="left",
-                                                        padx=(8, 2))
-        self._qty_var = tk.StringVar(value="1")
-        tk.Entry(add_bar, textvariable=self._qty_var,
-                 width=5).pack(side="left")
-        tk.Button(add_bar, text="Add", command=self._add_item,
-                  bg="#0F6E56", fg="white",
-                  relief="flat", padx=8).pack(side="left", padx=6)
-        tk.Button(add_bar, text="Remove", command=self._remove_item,
+        remove_bar = tk.Frame(right, bg="white")
+        remove_bar.grid(row=0, column=0, sticky="ew", padx=8, pady=6)
+        tk.Button(remove_bar, text="Remove Selected",
+                  command=self._remove_item,
                   relief="flat", padx=8).pack(side="left")
 
         icols = ("item", "qty", "subtotal")
@@ -178,6 +199,7 @@ class SalesOpenView(tk.Frame):
         preserve_uid: int | None,
     ):
         self._all_items = items
+        self._populate_catalog_tree()
 
         # Only open sales whose client is currently timed in
         visible = [s for s in sales if s.get("client_name") in active]
@@ -327,12 +349,41 @@ class SalesOpenView(tk.Frame):
     # Add item
     # ---------------------------------------------------------
 
-    def _pick_item(self):
-        dlg = ItemPickerDialog(self, self._all_items)
-        if dlg.result:
-            self._item_var.set(dlg.result)
+    def _populate_catalog_tree(self):
+        self._catalog_tree.delete(*self._catalog_tree.get_children())
+        by_cat = group_items_by_category(self._all_items, only_available=True)
+        for cat_name, group_items in by_cat.items():
+            catiid = f"cat_{cat_name}"
+            self._catalog_tree.insert(
+                "", "end", iid=catiid,
+                values=(f"{cat_name}  ({len(group_items)})", "", ""),
+                tags=("cat_group",))
+            for it in group_items:
+                self._catalog_tree.insert(
+                    catiid, "end", iid=it["item_name"], values=(
+                        it["item_name"], f"{it['price']:.2f}",
+                        it.get("available_stock", 0)))
+            self._catalog_tree.item(catiid, open=True)
 
-    def _add_item(self):
+    def _selected_catalog_item(self) -> str | None:
+        sel = self._catalog_tree.selection()
+        if not sel or sel[0].startswith("cat_"):
+            messagebox.showwarning("Select", "Select an item first.")
+            return None
+        return sel[0]
+
+    def _add_from_catalog(self):
+        name = self._selected_catalog_item()
+        if name:
+            self._add_item(name)
+
+    def _catalog_double_click(self):
+        name = self._selected_catalog_item()
+        if name:
+            self._qty_var.set("1")
+            self._add_item(name)
+
+    def _add_item(self, name: str):
         if self._loading:
             return
         if self._selected_uid is None:
@@ -346,9 +397,6 @@ class SalesOpenView(tk.Frame):
         if sale and sale.get("sale_status") != "open":
             messagebox.showwarning("Closed Sale",
                                    "You can only add items to an open sale.")
-            return
-        name = self._item_var.get().strip()
-        if not name:
             return
         try:
             qty = int(self._qty_var.get())
