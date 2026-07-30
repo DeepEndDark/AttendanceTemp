@@ -382,7 +382,8 @@ class ItemPickerDialog(tk.Toplevel):
         self.result: str | None = None
 
         tk.Label(self, text="Double-click an item, or select and click Choose.",
-                 fg="gray", font=("", 8)).pack(padx=12, pady=(10, 4), anchor="w")
+                 fg="gray", font=("", 8)).grid(
+            row=0, column=0, columnspan=2, padx=12, pady=(10, 4), sticky="w")
 
         cols = ("name", "price", "available")
         tree = ttk.Treeview(self, columns=cols, show="headings",
